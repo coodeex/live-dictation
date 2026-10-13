@@ -1,6 +1,9 @@
 # Local credentials and environment overrides
 .env
 .env.*
+*.env
+config.json
+config.local.json
 *.pem
 *.key
 *.p12

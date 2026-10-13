@@ -30,23 +30,56 @@ SETTINGS = ROOT / 'settings.json'
 DRAFT = ROOT / 'buffer-draft.txt'
 STYLE = pathlib.Path(__file__).with_name('style.css')
 SOCKET = pathlib.Path(os.environ.get('XDG_RUNTIME_DIR', f'/run/user/{os.getuid()}')) / 'live-dictation.sock'
-AZURE_ENDPOINT = 'https://galactic-azure-openai.openai.azure.com'
-DEPLOYMENT = 'gpt-live-transcribe'
+CONFIG_HOME = pathlib.Path(os.environ.get(
+    'XDG_CONFIG_HOME', pathlib.Path.home() / '.config')).expanduser()
+CONFIG_PATH = pathlib.Path(os.environ.get(
+    'LIVE_DICTATION_CONFIG', CONFIG_HOME / 'live-dictation/config.json')).expanduser()
 BRIDGE = 'org.gnome.Shell.Extensions.LiveDictation'
 BRIDGE_PATH = '/org/gnome/Shell/Extensions/LiveDictation'
-KEYMAP = str.maketrans({"'": "\\", '?': '_', ':': '>', ';': '<', '"': '@',
-                        'ä': "'", 'ö': ';', 'å': '[', 'Ä': '"', 'Ö': ':', 'Å': '{'})
+
+
+def load_config():
+    try:
+        config = json.loads(CONFIG_PATH.read_text(encoding='utf-8'))
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError) as error:
+        raise RuntimeError(f'Cannot read {CONFIG_PATH}: {error}') from error
+    if not isinstance(config, dict):
+        raise RuntimeError(f'{CONFIG_PATH} must contain a JSON object')
+    return config
+
+
+CONFIG = load_config()
+AZURE_ENDPOINT = (os.environ.get('AZURE_OPENAI_ENDPOINT') or
+                  CONFIG.get('azure_endpoint') or '').rstrip('/')
+DEPLOYMENT = (os.environ.get('AZURE_OPENAI_DEPLOYMENT') or
+              CONFIG.get('deployment') or 'gpt-live-transcribe')
+KEYMAP = str.maketrans(CONFIG.get('ydotool_keymap', {}))
 
 
 def api_key():
-    path = pathlib.Path.home() / '.codex/.env'
+    value = os.environ.get('AZURE_OPENAI_API_KEY', '').strip()
+    if value:
+        return value
+    key_file = os.environ.get('AZURE_OPENAI_KEY_FILE') or CONFIG.get('api_key_file')
+    if not key_file:
+        raise RuntimeError('Set AZURE_OPENAI_API_KEY or api_key_file in the user config')
+    path = pathlib.Path(os.path.expandvars(key_file)).expanduser()
     value = None
-    with path.open() as source:
-        for line in source:
-            if line.startswith('AZURE_OPENAI_API_KEY='):
-                value = line.partition('=')[2].strip().strip('"').strip("'")
+    try:
+        with path.open() as source:
+            for line in source:
+                line = line.strip()
+                if line.startswith('#'):
+                    continue
+                name, sep, raw = line.partition('=')
+                if sep and name.strip() == 'AZURE_OPENAI_API_KEY':
+                    value = raw.strip().strip('"').strip("'")
+    except OSError as error:
+        raise RuntimeError(f'Cannot read Azure key file {path}: {error}') from error
     if not value:
-        raise RuntimeError('AZURE_OPENAI_API_KEY is missing from ~/.codex/.env')
+        raise RuntimeError(f'AZURE_OPENAI_API_KEY is missing from {path}')
     return value
 
 
@@ -567,6 +600,8 @@ class Dictation:
                 self.window.hide()
             return
         try:
+            if not AZURE_ENDPOINT:
+                raise RuntimeError('Set azure_endpoint in the user config or AZURE_OPENAI_ENDPOINT')
             key = api_key()
             if self.mode == 'cursor':
                 current = focused_accessible()

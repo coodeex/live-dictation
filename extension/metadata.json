@@ -1,1 +1,1 @@
-{"uuid":"live-dictation@juha.local","name":"Live Dictation F4","description":"F4 shortcut and original-window focus bridge for live dictation","shell-version":["42"]}
+{"uuid":"live-dictation@coodeex","name":"Live Dictation Focus Bridge","description":"Restores the original window when dictating to the caret","shell-version":["42"]}

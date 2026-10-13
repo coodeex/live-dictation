@@ -1,0 +1,6 @@
+{
+  "azure_endpoint": "https://YOUR_RESOURCE.openai.azure.com",
+  "deployment": "gpt-live-transcribe",
+  "api_key_file": "~/.config/live-dictation/azure.env",
+  "ydotool_keymap": {}
+}
