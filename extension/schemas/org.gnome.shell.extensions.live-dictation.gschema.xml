@@ -1,0 +1,8 @@
+<schemalist>
+  <schema id="org.gnome.shell.extensions.live-dictation" path="/org/gnome/shell/extensions/live-dictation/">
+    <key name="toggle" type="as">
+      <default>['F4']</default>
+      <summary>Toggle live dictation</summary>
+    </key>
+  </schema>
+</schemalist>

@@ -1,0 +1,31 @@
+# Local credentials and environment overrides
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Python and generated GNOME files
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+extension/schemas/gschemas.compiled
+
+# Dictation data and local state
+history/
+*.wav
+*.flac
+*.mp3
+*.m4a
+*.jsonl
+transcript.txt
+buffer-draft.txt
+settings.json
+*.sqlite*
+*.log
+*.sock
+
+.DS_Store
