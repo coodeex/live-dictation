@@ -1,1 +1,1 @@
-websockets>=15,<16
+# GTK and AT-SPI use distribution packages; no PyPI packages are required.

@@ -2,7 +2,6 @@
 """Azure live dictation, with a GTK buffer and durable per-session history."""
 import asyncio
 import audioop
-import base64
 import datetime as dt
 import json
 import math
@@ -11,8 +10,12 @@ import pathlib
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 import uuid
 import wave
 
@@ -22,12 +25,12 @@ gi.require_version('Gdk', '3.0')
 gi.require_version('Atspi', '2.0')
 gi.require_version('Pango', '1.0')
 from gi.repository import Atspi, Gdk, GLib, Gtk, Pango
-import websockets
 
 ROOT = pathlib.Path.home() / '.local/share/live-dictation'
 HISTORY = ROOT / 'history'
 SETTINGS = ROOT / 'settings.json'
 DRAFT = ROOT / 'buffer-draft.txt'
+TIMINGS = ROOT / 'timings.jsonl'
 STYLE = pathlib.Path(__file__).with_name('style.css')
 SOCKET = pathlib.Path(os.environ.get('XDG_RUNTIME_DIR', f'/run/user/{os.getuid()}')) / 'live-dictation.sock'
 CONFIG_HOME = pathlib.Path(os.environ.get(
@@ -54,7 +57,9 @@ CONFIG = load_config()
 AZURE_ENDPOINT = (os.environ.get('AZURE_OPENAI_ENDPOINT') or
                   CONFIG.get('azure_endpoint') or '').rstrip('/')
 DEPLOYMENT = (os.environ.get('AZURE_OPENAI_DEPLOYMENT') or
-              CONFIG.get('deployment') or 'gpt-live-transcribe')
+              CONFIG.get('deployment') or 'gpt-transcribe')
+API_VERSION = (os.environ.get('AZURE_OPENAI_API_VERSION') or
+               CONFIG.get('api_version') or '2025-03-01-preview')
 KEYMAP = str.maketrans(CONFIG.get('ydotool_keymap', {}))
 
 
@@ -125,6 +130,21 @@ def atomic_text(path, contents):
     temp.replace(path)
 
 
+def append_timing(session, recording_seconds, processing_seconds, status):
+    entry = {
+        'session': session.path.name,
+        'started': session.started,
+        'status': status,
+        'recording_seconds': round(recording_seconds, 3),
+        'processing_seconds': (round(processing_seconds, 3)
+                               if processing_seconds is not None else None),
+    }
+    descriptor = os.open(TIMINGS, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    with os.fdopen(descriptor, 'a', encoding='utf-8') as log:
+        log.write(json.dumps(entry, ensure_ascii=False) + '\n')
+    os.chmod(TIMINGS, 0o600)
+
+
 class Session:
     def __init__(self, mode):
         stamp = dt.datetime.now().strftime('%Y%m%d-%H%M%S')
@@ -137,10 +157,8 @@ class Session:
         self.audio.setnchannels(1)
         self.audio.setsampwidth(2)
         self.audio.setframerate(24000)
-        self.parts = {}
-        self.order = []
-        self.commit_count = 0
-        self.completed_count = 0
+        self.final_text = ''
+        self.audio_closed = False
         self.status = 'recording'
         self.write_metadata()
 
@@ -154,35 +172,26 @@ class Session:
         self.events.write(json.dumps({'time': dt.datetime.now().astimezone().isoformat(),
                                       'kind': kind, **fields}, ensure_ascii=False) + '\n')
 
-    def update(self, item, delta=None, final=None):
-        self.ensure_item(item)
-        part = self.parts[item]
-        if delta is not None:
-            part['text'] += delta
-            self.event('delta', item_id=item, text=delta)
-        if final is not None:
-            part['text'] = final
-            part['final'] = True
-            self.event('final', item_id=item, text=final)
+    def set_transcript(self, text):
+        self.final_text = text
+        self.event('final', text=text)
         self.save_transcript()
-        return part['text']
-
-    def ensure_item(self, item):
-        if item not in self.parts:
-            self.parts[item] = {'text': '', 'final': False}
-            self.order.append(item)
 
     def transcript(self):
-        return ' '.join(self.parts[item]['text'].strip() for item in self.order
-                        if self.parts[item]['text'].strip())
+        return self.final_text
 
     def save_transcript(self):
         atomic_text(self.path / 'transcript.txt', self.transcript() + '\n')
 
+    def close_audio(self):
+        if not self.audio_closed:
+            self.audio.close()
+            self.audio_closed = True
+
     def finish(self, status):
         self.status = status
         self.ended = dt.datetime.now().astimezone().isoformat()
-        self.audio.close()
+        self.close_audio()
         self.save_transcript()
         self.write_metadata()
         self.events.close()
@@ -194,7 +203,9 @@ class Dictation:
         HISTORY.mkdir(mode=0o700, parents=True, exist_ok=True)
         os.chmod(ROOT, 0o700)
         os.chmod(HISTORY, 0o700)
-        self.prefs = {'mode': 'cursor'}
+        TIMINGS.touch(mode=0o600, exist_ok=True)
+        os.chmod(TIMINGS, 0o600)
+        self.prefs = {'mode': 'cursor', 'press_enter': False}
         if SETTINGS.exists():
             try:
                 self.prefs.update(json.loads(SETTINGS.read_text()))
@@ -203,6 +214,7 @@ class Dictation:
         self.mode = self.prefs.get('mode', 'cursor')
         self.session = None
         self.stop_event = None
+        self.cancel_event = None
         self.worker = None
         self.audio_loop = None
         self.audio_proc = None
@@ -211,8 +223,15 @@ class Dictation:
         self.wave_display = 0.0
         self.wave_phase = 0.0
         self.wave_active = False
+        self.wave_processing = False
         self.wave_timer = None
         self.copy_feedback_timer = None
+        self.timing_timer = None
+        self.close_timer = None
+        self.record_started = None
+        self.record_seconds = 0.0
+        self.processing_started = None
+        self.processing_seconds = None
         self._install_css()
         self._build_ui()
         self._socket_setup()
@@ -300,7 +319,17 @@ class Dictation:
         (self.cursor_button if self.mode == 'cursor' else self.buffer_button).set_active(True)
         self.cursor_button.connect('toggled', self._mode_changed)
         self.buffer_button.connect('toggled', self._mode_changed)
-        close = Gtk.Button(label='✕')
+        self.enter_button = Gtk.ToggleButton(label='↵')
+        self.enter_button.set_relief(Gtk.ReliefStyle.NONE)
+        self.enter_button.set_can_focus(False)
+        self.enter_button.set_size_request(24, 24)
+        self.enter_button.set_active(self.prefs.get('press_enter') is True)
+        self.enter_button.set_sensitive(self.mode == 'cursor')
+        self.enter_button.set_tooltip_text('Press Enter after inserting at caret')
+        self.enter_button.get_style_context().add_class('ld-enter-toggle')
+        self.enter_button.connect('toggled', self._enter_changed)
+        header_row.pack_start(self.enter_button, False, False, 0)
+        close = Gtk.Button(label='−')
         close.set_relief(Gtk.ReliefStyle.NONE)
         close.set_can_focus(False)
         close.set_size_request(22, 22)
@@ -320,6 +349,11 @@ class Dictation:
         self.live.get_style_context().add_class('ld-live')
         live_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
         card.pack_start(live_row, False, False, 0)
+        self.timing = Gtk.Label(label='0:00')
+        self.timing.set_xalign(0)
+        self.timing.set_width_chars(13)
+        self.timing.get_style_context().add_class('ld-timing')
+        live_row.pack_start(self.timing, False, False, 0)
         live_row.pack_start(self.live, True, True, 0)
         wave_frame = Gtk.Box()
         wave_frame.get_style_context().add_class('ld-waveform-frame')
@@ -365,6 +399,11 @@ class Dictation:
 
         buttons = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         card.pack_start(buttons, False, False, 0)
+        self.cancel_button = Gtk.Button(label='Cancel')
+        self.cancel_button.set_no_show_all(True)
+        self.cancel_button.get_style_context().add_class('ld-ghost')
+        self.cancel_button.connect('clicked', self._cancel_recording)
+        buttons.pack_start(self.cancel_button, False, False, 0)
         buttons.pack_start(Gtk.Box(), True, True, 0)
         history = Gtk.Button(label='History')
         history.connect('clicked', lambda *_: subprocess.Popen(['xdg-open', str(HISTORY)]))
@@ -396,7 +435,12 @@ class Dictation:
             distance = abs(index - (count - 1) / 2) / ((count - 1) / 2)
             shape = 0.35 + 0.65 * (1 - distance)
             pulse = 0.60 + 0.40 * math.sin(self.wave_phase + index * 0.83) ** 2
-            bar_height = 3 + level * (height - 5) * shape * pulse
+            if self.wave_processing:
+                sweep = (count - 1) * (0.5 + 0.5 * math.sin(self.wave_phase))
+                glow = math.exp(-((index - sweep) / 2.6) ** 2)
+                bar_height = 3 + (height - 7) * glow * (0.62 + 0.38 * pulse)
+            else:
+                bar_height = 3 + level * (height - 5) * shape * pulse
             x = left + index * (bar_width + gap)
             y = (height - bar_height) / 2
             radius = bar_width / 2
@@ -404,7 +448,9 @@ class Dictation:
             context.arc(x + radius, y + radius, radius, math.pi, 2 * math.pi)
             context.arc(x + radius, y + bar_height - radius, radius, 0, math.pi)
             context.close_path()
-            if self.wave_active:
+            if self.wave_processing:
+                context.set_source_rgba(0.431, 0.906, 0.718, 0.24 + 0.72 * glow)
+            elif self.wave_active:
                 context.set_source_rgba(0.204, 0.827, 0.600, 0.55 + 0.35 * level)
             else:
                 context.set_source_rgba(1.0, 1.0, 1.0, 0.23)
@@ -428,19 +474,72 @@ class Dictation:
                 self.wave_timer = None
         self.waveform.queue_draw()
 
+    def _set_wave_processing(self, processing):
+        self.wave_processing = processing
+        context = self.wave_frame.get_style_context()
+        dot = self.recording_dot.get_style_context()
+        if processing:
+            context.add_class('ld-waveform-processing')
+            dot.add_class('ld-dot-processing')
+            if self.wave_timer is None:
+                self.wave_timer = GLib.timeout_add(45, self._animate_waveform)
+        else:
+            context.remove_class('ld-waveform-processing')
+            dot.remove_class('ld-dot-processing')
+            if not self.wave_active and self.wave_timer is not None:
+                GLib.source_remove(self.wave_timer)
+                self.wave_timer = None
+        self.waveform.queue_draw()
+
     def _set_wave_level(self, session, level):
         if self.session is session and self.wave_active:
             self.wave_level = level
         return False
 
     def _animate_waveform(self):
-        if not self.wave_active:
+        if not self.wave_active and not self.wave_processing:
             self.wave_timer = None
             return False
-        self.wave_phase += 0.21
-        self.wave_display += (max(0.26, self.wave_level) - self.wave_display) * 0.32
+        self.wave_phase += 0.13 if self.wave_processing else 0.21
+        if self.wave_active:
+            self.wave_display += (max(0.26, self.wave_level) - self.wave_display) * 0.32
         self.waveform.queue_draw()
         return True
+
+    @staticmethod
+    def _clock(seconds):
+        whole = max(0, int(seconds))
+        return f'{whole // 60}:{whole % 60:02d}'
+
+    def _update_timing(self):
+        recording = (time.monotonic() - self.record_started
+                     if self.record_started is not None and self.processing_started is None
+                     else self.record_seconds)
+        display = self._clock(recording)
+        if self.processing_started is not None:
+            processing = (time.monotonic() - self.processing_started
+                          if self.processing_seconds is None else self.processing_seconds)
+            display += ' · ' + self._clock(processing)
+        self.timing.set_text(display)
+        return True
+
+    def _cancel_close_timer(self):
+        if self.close_timer is not None:
+            GLib.source_remove(self.close_timer)
+            self.close_timer = None
+
+    def _hide_completed(self):
+        self.close_timer = None
+        if self.stop_event is None and self.mode == 'cursor' and not self.delivery_error:
+            self.window.hide()
+        return False
+
+    def _set_cancel_visible(self, visible):
+        self.cancel_button.set_no_show_all(not visible)
+        if visible:
+            self.cancel_button.show()
+        else:
+            self.cancel_button.hide()
 
     def _socket_setup(self):
         if SOCKET.exists():
@@ -466,9 +565,7 @@ class Dictation:
                 if command == 'toggle':
                     self.toggle()
                 elif command == 'show':
-                    self.window.show_all()
-                    self.window.deiconify()
-                    self._ensure_topmost()
+                    self._open_top_right()
                 elif command == 'reassert-topmost':
                     self._ensure_topmost()
                 elif command == 'buffer':
@@ -499,22 +596,53 @@ class Dictation:
         self.window.set_keep_above(False)
         self.window.set_keep_above(True)
 
+    def _move_window(self, x, y):
+        self.window.move(x, y)
+        return False
+
+    def _top_right_position(self):
+        display = self.window.get_display()
+        monitor = display.get_primary_monitor() or display.get_monitor(0)
+        area = monitor.get_workarea()
+        width, height = self.window.get_size()
+        return (max(area.x, area.x + area.width - width - 8), area.y + 8)
+
+    def _open_top_right(self):
+        position = self._top_right_position()
+        self._move_window(*position)
+        self.window.show_all()
+        self.window.deiconify()
+        self._move_window(*position)
+        GLib.idle_add(self._move_window, *position)
+        self._ensure_topmost()
+
     def _save_prefs(self):
         self.prefs['mode'] = self.mode
         atomic_text(SETTINGS, json.dumps(self.prefs, indent=2) + '\n')
         os.chmod(SETTINGS, 0o600)
 
+    def _enter_changed(self, button):
+        self.prefs['press_enter'] = button.get_active()
+        self._save_prefs()
+
     def _mode_changed(self, button):
         if not button.get_active():
             return
+        self._cancel_close_timer()
+        position = (self.window.get_position() if self.window.get_visible()
+                    else self._top_right_position())
         self.mode = 'cursor' if button is self.cursor_button else 'buffer'
+        self.enter_button.set_sensitive(self.mode == 'cursor')
         if self.session:
             self.session.event('destination', mode=self.mode)
         self._save_prefs()
         if self.mode == 'cursor':
             self.window.hide()
             self.window.set_accept_focus(False)
+            self._move_window(*position)
             self.window.show_all()
+            self._move_window(*position)
+            GLib.idle_add(self._move_window, *position)
             self._ensure_topmost()
             restored = self._restore_target()
             if restored is False:
@@ -522,6 +650,8 @@ class Dictation:
         else:
             self.window.set_accept_focus(True)
             self.window.present()
+            self._move_window(*position)
+            GLib.idle_add(self._move_window, *position)
 
     def _copy(self, *_args):
         buffer = self.text.get_buffer()
@@ -584,20 +714,41 @@ class Dictation:
             return False
         try:
             subprocess.run(['sudo', '-n', 'ydotool', 'type', '--key-delay', '1', '--file', '-'],
-                           input=mapped, text=True, timeout=4, check=True,
+                           input=mapped, text=True, timeout=max(4, len(mapped) / 30), check=True,
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             return True
         except (OSError, subprocess.SubprocessError):
             return False
 
+    def _press_enter(self):
+        if not self._target_focused():
+            return False
+        try:
+            subprocess.run(['sudo', '-n', 'ydotool', 'key', 'enter'], timeout=4,
+                           check=True, stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL)
+            return True
+        except (OSError, subprocess.SubprocessError):
+            return False
+
     def toggle(self):
+        self._cancel_close_timer()
         if self.stop_event is not None:
+            if self.stop_event.is_set():
+                return
+            self.record_seconds = time.monotonic() - self.record_started
+            self.processing_started = time.monotonic()
+            self.processing_seconds = None
+            self._update_timing()
             self.stop_event.set()
+            self._set_cancel_visible(False)
             self.recording_dot.get_style_context().remove_class('ld-dot-active')
             self._set_wave_active(False)
+            self._set_wave_processing(True)
             self._stop_microphone_now()
-            if self.mode != 'buffer':
-                self.window.hide()
+            self.toggle_button.set_label('···')
+            self.toggle_button.set_sensitive(False)
+            self.status.set_text('')
             return
         try:
             if not AZURE_ENDPOINT:
@@ -611,24 +762,49 @@ class Dictation:
                     self.buffer_button.set_active(True)
                     self.status.set_text('No caret target · using Buffer')
             self.session = Session(self.mode)
-            self._output_emitted = {}
+            self.delivery_error = False
             self.stop_event = threading.Event()
+            self.cancel_event = threading.Event()
+            self.record_started = time.monotonic()
+            self.record_seconds = 0.0
+            self.processing_started = None
+            self.processing_seconds = None
+            self._update_timing()
+            if self.timing_timer is not None:
+                GLib.source_remove(self.timing_timer)
+            self.timing_timer = GLib.timeout_add(200, self._update_timing)
             self.audio_loop = None
             self.audio_proc = None
-            self.window.show_all()
-            self.window.deiconify()
-            self._ensure_topmost()
+            self._open_top_right()
+            self._set_cancel_visible(True)
             if self.mode == 'cursor':
                 GLib.timeout_add(150, self._restore_after_show)
             self.toggle_button.set_label('Stop · F4')
             self.recording_dot.get_style_context().add_class('ld-dot-active')
+            self._set_wave_processing(False)
             self._set_wave_active(True)
-            self.status.set_text('Connecting to Azure…')
+            self.status.set_text('Recording · F4 to transcribe')
             self.live.set_text('')
-            self.worker = threading.Thread(target=self._run_thread, args=(key, self.session, self.stop_event), daemon=True)
+            self.worker = threading.Thread(target=self._run_thread,
+                                           args=(key, self.session, self.stop_event, self.cancel_event),
+                                           daemon=True)
             self.worker.start()
         except Exception as error:
             self.status.set_text(f'Start failed: {error}')
+
+    def _cancel_recording(self, *_args):
+        if self.stop_event is None or self.stop_event.is_set():
+            return
+        self.record_seconds = time.monotonic() - self.record_started
+        self.record_started = None
+        self.cancel_event.set()
+        self.stop_event.set()
+        self._stop_microphone_now()
+        self._set_cancel_visible(False)
+        self.recording_dot.get_style_context().remove_class('ld-dot-active')
+        self._set_wave_active(False)
+        self.toggle_button.set_sensitive(False)
+        self.window.hide()
 
     def _stop_microphone_now(self):
         loop = self.audio_loop
@@ -643,168 +819,177 @@ class Dictation:
             except ProcessLookupError:
                 pass
 
-    def _run_thread(self, key, session, stop):
+    def _run_thread(self, key, session, stop, cancel):
         result = 'complete'
         try:
-            asyncio.run(self._stream(key, session, stop))
+            asyncio.run(self._capture(session, stop))
+            session.close_audio()
+            if cancel.is_set():
+                result = 'cancelled'
+                session.event('cancelled')
+            else:
+                transcript = self._transcribe_file(key, session)
+                session.set_transcript(transcript)
+                GLib.idle_add(self._text_event, session, transcript)
         except Exception as error:
-            result = 'failed'
-            session.event('error', message=str(error))
-            GLib.idle_add(self.status.set_text, f'Error: {error}')
+            if cancel.is_set():
+                result = 'cancelled'
+                session.event('cancelled')
+            else:
+                result = 'failed'
+                session.event('error', message=str(error))
+                GLib.idle_add(self.status.set_text, f'Error: {error}')
         finally:
+            recording_seconds = (self.record_seconds if stop.is_set() else
+                                 time.monotonic() - self.record_started)
+            processing_seconds = (time.monotonic() - self.processing_started
+                                  if self.processing_started is not None else None)
             session.finish(result)
-            GLib.idle_add(self._finished, result)
+            try:
+                append_timing(session, recording_seconds, processing_seconds, result)
+            except OSError as error:
+                print(f'Could not save dictation timing: {error}', file=sys.stderr)
+            GLib.idle_add(self._finished, result, recording_seconds, processing_seconds)
 
     def _restore_after_show(self):
         if not self._restore_target() and self.window.has_toplevel_focus():
             self.status.set_text('Caret target unavailable · switch to Buffer')
         return False
 
-    async def _stream(self, key, session, stop):
-        url = AZURE_ENDPOINT.replace('https://', 'wss://') + '/openai/v1/realtime?intent=transcription'
-        async with websockets.connect(url, additional_headers={'api-key': key}, open_timeout=12) as ws:
-            await ws.send(json.dumps({'type': 'session.update', 'session': {
-                'type': 'transcription', 'audio': {'input': {
-                    'format': {'type': 'audio/pcm', 'rate': 24000},
-                    'turn_detection': None,
-                    'transcription': {'model': DEPLOYMENT, 'delay': 'low'}}}}}))
-            for _ in range(5):
-                event = json.loads(await asyncio.wait_for(ws.recv(), 12))
-                if event.get('type') == 'error':
-                    raise RuntimeError(event.get('error', {}).get('message', 'Azure session error'))
-                if event.get('type') == 'session.updated':
-                    break
-            else:
-                raise RuntimeError('Azure did not configure the transcription session')
-            if stop.is_set():
-                return
-            GLib.idle_add(self.status.set_text, 'Recording · F4 to stop')
-            proc = await asyncio.create_subprocess_exec('parec', '--raw', '--format=s16le',
-                '--rate=24000', '--channels=1', stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.DEVNULL)
-            self.audio_loop = asyncio.get_running_loop()
-            self.audio_proc = proc
-            receiver = asyncio.create_task(self._receive(ws, session))
-            uncommitted = 0
+    async def _capture(self, session, stop):
+        proc = await asyncio.create_subprocess_exec('parec', '--raw', '--format=s16le',
+            '--rate=24000', '--channels=1', stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL)
+        self.audio_loop = asyncio.get_running_loop()
+        self.audio_proc = proc
+        try:
+            while not stop.is_set():
+                try:
+                    chunk = await asyncio.wait_for(proc.stdout.read(4800), .5)
+                except asyncio.TimeoutError:
+                    continue
+                if not chunk:
+                    if stop.is_set():
+                        break
+                    raise RuntimeError('Microphone capture stopped')
+                meter_bytes = chunk[:len(chunk) & ~1]
+                rms = audioop.rms(meter_bytes, 2) if meter_bytes else 0
+                level = min(1.0, max(0.0, (rms - 160) / 3500))
+                GLib.idle_add(self._set_wave_level, session, level)
+                session.audio.writeframesraw(chunk)
+        finally:
+            self._terminate_microphone()
             try:
-                while not stop.is_set():
-                    try:
-                        chunk = await asyncio.wait_for(proc.stdout.read(4800), .5)
-                    except asyncio.TimeoutError:
-                        continue
-                    if not chunk:
-                        if stop.is_set():
-                            break
-                        raise RuntimeError('Microphone capture stopped')
-                    meter_bytes = chunk[:len(chunk) & ~1]
-                    rms = audioop.rms(meter_bytes, 2) if meter_bytes else 0
-                    level = min(1.0, max(0.0, (rms - 160) / 3500))
-                    GLib.idle_add(self._set_wave_level, session, level)
-                    session.audio.writeframesraw(chunk)
-                    await ws.send(json.dumps({'type': 'input_audio_buffer.append',
-                                              'audio': base64.b64encode(chunk).decode('ascii')}))
-                    uncommitted += len(chunk)
-                    if uncommitted >= 24000 * 2 * 3:
-                        await ws.send(json.dumps({'type': 'input_audio_buffer.commit'}))
-                        session.commit_count += 1
-                        uncommitted = 0
-                    if receiver.done():
-                        await receiver
-                self._terminate_microphone()
+                await asyncio.wait_for(proc.wait(), 2)
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+            self.audio_proc = None
+            self.audio_loop = None
+
+    def _transcribe_file(self, key, session):
+        audio_path = session.path / 'audio.wav'
+        with wave.open(str(audio_path), 'rb') as recorded:
+            if recorded.getnframes() == 0:
+                raise RuntimeError('No audio captured')
+        with tempfile.TemporaryDirectory(prefix='live-dictation-upload-') as temporary:
+            upload = audio_path
+            # The file API accepts at most 25 MB. Keep the original WAV in
+            # history and compress only the copy sent for a long recording.
+            if audio_path.stat().st_size > 24_000_000:
+                upload = pathlib.Path(temporary) / 'audio.mp3'
                 try:
-                    await asyncio.wait_for(proc.wait(), 2)
-                except asyncio.TimeoutError:
-                    proc.kill()
-                    await proc.wait()
-                self.audio_proc = None
-                self.audio_loop = None
-                if uncommitted:
-                    await ws.send(json.dumps({'type': 'input_audio_buffer.commit'}))
-                    session.commit_count += 1
-                deadline = time.monotonic() + 12
-                while session.completed_count < session.commit_count and time.monotonic() < deadline:
-                    if receiver.done():
-                        await receiver
-                    await asyncio.sleep(.1)
-                if session.completed_count < session.commit_count:
-                    session.event('final_timeout', pending=session.commit_count - session.completed_count)
-            finally:
-                self._terminate_microphone()
+                    subprocess.run(['ffmpeg', '-hide_banner', '-loglevel', 'error', '-y',
+                                    '-i', str(audio_path), '-ac', '1', '-b:a', '48k',
+                                    str(upload)], check=True, timeout=120,
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+                except (OSError, subprocess.SubprocessError) as error:
+                    raise RuntimeError(f'Could not prepare long audio for upload: {error}') from error
+            if upload.stat().st_size > 24_000_000:
+                raise RuntimeError('Recording exceeds the 25 MB transcription limit; audio saved in History')
+            boundary = '----live-dictation-' + uuid.uuid4().hex
+            name = upload.name
+            mime = 'audio/mpeg' if upload.suffix == '.mp3' else 'audio/wav'
+            body = (f'--{boundary}\r\nContent-Disposition: form-data; name="model"\r\n\r\n'
+                    f'{DEPLOYMENT}\r\n--{boundary}\r\n'
+                    f'Content-Disposition: form-data; name="file"; filename="{name}"\r\n'
+                    f'Content-Type: {mime}\r\n\r\n').encode() + upload.read_bytes() + f'\r\n--{boundary}--\r\n'.encode()
+            version = urllib.parse.urlencode({'api-version': API_VERSION})
+            url = (f'{AZURE_ENDPOINT}/openai/deployments/{urllib.parse.quote(DEPLOYMENT, safe="")}'
+                   f'/audio/transcriptions?{version}')
+            request = urllib.request.Request(url, data=body, method='POST', headers={
+                'api-key': key, 'Content-Type': f'multipart/form-data; boundary={boundary}'})
+            try:
+                with urllib.request.urlopen(request, timeout=300) as response:
+                    payload = json.load(response)
+            except urllib.error.HTTPError as error:
                 try:
-                    await asyncio.wait_for(proc.wait(), 2)
-                except asyncio.TimeoutError:
-                    proc.kill()
-                    await proc.wait()
-                self.audio_proc = None
-                self.audio_loop = None
-                receiver.cancel()
-                await asyncio.gather(receiver, return_exceptions=True)
+                    detail = json.loads(error.read(2048)).get('error', {}).get('message', '')
+                except (ValueError, AttributeError):
+                    detail = ''
+                raise RuntimeError(f'Azure transcription failed ({error.code}): {detail or error.reason}') from error
+            except urllib.error.URLError as error:
+                raise RuntimeError(f'Azure transcription connection failed: {error.reason}') from error
+            transcript = payload.get('text')
+            if not isinstance(transcript, str):
+                raise RuntimeError('Azure transcription returned no text field')
+            return transcript.strip()
 
-    async def _receive(self, ws, session):
-        async for raw in ws:
-            event = json.loads(raw)
-            kind = event.get('type', '')
-            if kind == 'error':
-                raise RuntimeError(event.get('error', {}).get('message', 'Azure error'))
-            item = event.get('item_id')
-            if kind == 'input_audio_buffer.committed' and item:
-                session.ensure_item(item)
-            elif kind == 'conversation.item.input_audio_transcription.delta' and item:
-                delta = event.get('delta', '')
-                if delta:
-                    session.update(item, delta=delta)
-                    self._queue_text(session, item, final=False)
-            elif kind == 'conversation.item.input_audio_transcription.completed' and item:
-                final = event.get('transcript', '')
-                session.update(item, final=final)
-                session.completed_count += 1
-                self._queue_text(session, item, final=True)
-            elif kind == 'conversation.item.input_audio_transcription.failed':
-                session.completed_count += 1
-                session.event('transcription_failed', detail=event.get('error', {}))
-                GLib.idle_add(self.status.set_text, 'Transcription segment failed · audio saved')
-
-    def _queue_text(self, session, item, final):
-        prefix = '' if session.order[0] == item else ' '
-        candidate = prefix + session.parts[item]['text'].lstrip()
-        if not final:
-            candidate = candidate.rstrip('.,!?;:')
-        GLib.idle_add(self._text_event, session, item, candidate, session.transcript())
-
-    def _text_event(self, session, item, candidate, transcript):
+    def _text_event(self, session, transcript):
         if self.session is not session:
             return False
         self.live.set_text(transcript[-300:])
-        emitted = self._output_emitted.get(item, '')
-        if not candidate.startswith(emitted):
-            self.status.set_text('Final wording revised · exact text saved in History')
-            return False
-        delta = candidate[len(emitted):]
-        if not delta:
+        if not transcript:
+            self.status.set_text('No speech recognized · audio saved in History')
+            self.delivery_error = True
             return False
         if self.mode == 'buffer':
             buffer = self.text.get_buffer()
-            buffer.insert(buffer.get_end_iter(), delta)
-            self._output_emitted[item] = candidate
+            buffer.insert(buffer.get_end_iter(), transcript)
         else:
             if not self._target_focused():
-                self.status.set_text('Caret focus changed · text saved in History')
+                self.delivery_error = True
+                buffer = self.text.get_buffer()
+                buffer.insert(buffer.get_end_iter(), transcript)
+                self.buffer_button.set_active(True)
+                self.status.set_text('Caret focus changed · transcript kept in Buffer')
                 return False
-            if self._type_target(delta):
-                self._output_emitted[item] = candidate
-            else:
-                self.status.set_text('Could not type at cursor · text saved in History')
+            if not self._type_target(transcript):
+                self.delivery_error = True
+                buffer = self.text.get_buffer()
+                buffer.insert(buffer.get_end_iter(), transcript)
+                self.buffer_button.set_active(True)
+                self.status.set_text('Could not type at caret · transcript kept in Buffer')
+            elif self.enter_button.get_active() and not self._press_enter():
+                self.delivery_error = True
+                self.status.set_text('Text inserted · Enter could not be pressed')
         return False
 
-    def _finished(self, result):
+    def _finished(self, result, recording_seconds, processing_seconds):
+        if self.timing_timer is not None:
+            GLib.source_remove(self.timing_timer)
+            self.timing_timer = None
+        self.record_seconds = recording_seconds
+        self.processing_seconds = processing_seconds
+        self._update_timing()
         self.stop_event = None
+        self.cancel_event = None
         self.session = None
         self.worker = None
         self.recording_dot.get_style_context().remove_class('ld-dot-active')
+        self._set_wave_processing(False)
         self._set_wave_active(False)
         self.toggle_button.set_label('Start · F4')
+        self.toggle_button.set_sensitive(True)
+        self._set_cancel_visible(False)
         if result == 'complete':
-            self.status.set_text('Saved · F4 to start again')
+            if not self.delivery_error:
+                self.status.set_text('Saved · F4 to start again')
+            if self.mode == 'cursor' and not self.delivery_error:
+                self.close_timer = GLib.timeout_add(3000, self._hide_completed)
+        elif result == 'cancelled':
+            self.status.set_text('Ready · F4 to start')
+            self.window.hide()
         return False
 
 

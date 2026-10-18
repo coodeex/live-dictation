@@ -1,30 +1,32 @@
 # Live Dictation
 
-> **Speak naturally. Watch the words land.**
+> **Speak naturally. Press stop. Let the words land.**
 
-Live Dictation is a small, always-on-top voice panel for GNOME on Linux. It streams Azure OpenAI transcription as you speak—straight into the app you are using, or into a buffer you can review and copy.
+Live Dictation is a small, always-on-top voice panel for GNOME on Linux. It records your speech locally, then transcribes it with Azure OpenAI when you stop. The finished text goes into the app you are using or an editable buffer.
 
-![Live Dictation streaming text into an editor while recording](assets/live-dictation.png)
+![Live Dictation popup above an editor](assets/live-dictation.png)
 
 ## One shortcut. Two ways to write.
 
 | **Caret** | **Buffer** |
 | :-- | :-- |
-| Words appear at the active text cursor while you keep working. | Words collect in an editable panel. Stop, review, then copy with one click. |
+| The finished transcript appears at the active text cursor when you stop recording. | The finished transcript goes into an editable panel you can review and copy. |
 
 Switch destinations during a recording. The translucent GTK panel stays above your windows, shows a live audio meter, and keeps every session’s audio and transcript in a local history.
+
+The panel opens at the top right of your primary monitor. Drag it elsewhere while it is open; switching between Caret and Buffer keeps that position.
 
 **[Get started →](docs/SETUP.md)** · **[See how it works →](docs/ARCHITECTURE.md)**
 
 ## Made to stay out of the way
 
-- **Immediate feedback.** Partial transcription appears while you speak.
+- **One complete result.** Speech is transcribed after you stop, then inserted once.
 - **Your choice of destination.** Use the active caret for speed or the buffer for control.
 - **A record you can revisit.** Audio, transcript, and session events are saved locally.
 - **A native desktop feel.** GTK 3, a draggable glass panel, a compact audio meter, and a single shortcut to start or stop.
 
 ## Bring your own Azure deployment
 
-Clone the repo, install the Linux dependencies, and point a private user config at your Azure OpenAI realtime transcription deployment. Credentials and recordings stay outside Git. The [setup guide](docs/SETUP.md) walks through the service, shortcut, and optional GNOME focus helper; [architecture notes](docs/ARCHITECTURE.md) explain the streaming and storage paths.
+Clone the repo, install the Linux dependencies, and point a private user config at your Azure OpenAI `gpt-transcribe` deployment. The app uploads one completed audio file after you stop, so pauses do not end the recording. Credentials and recordings stay outside Git. The [setup guide](docs/SETUP.md) walks through the service, shortcut, and optional GNOME focus helper; [architecture notes](docs/ARCHITECTURE.md) explain the recording and transcription paths.
 
 Built and tested on Ubuntu with GNOME, GTK 3, and XWayland. Audio is sent to your configured Azure OpenAI resource for transcription.
