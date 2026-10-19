@@ -7,6 +7,7 @@ import json
 import math
 import os
 import pathlib
+import re
 import socket
 import subprocess
 import sys
@@ -17,6 +18,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+import unicodedata
 import wave
 
 import gi
@@ -129,6 +131,23 @@ def atomic_text(path, contents):
     temp = path.with_suffix(path.suffix + '.tmp')
     temp.write_text(contents)
     temp.replace(path)
+
+
+def split_terminal_cue(transcript, allow_hold=False):
+    """Return delivered text and its final spoken command, if any."""
+    ending = transcript.rstrip()
+    while ending and unicodedata.category(ending[-1])[0] in ('P', 'S'):
+        ending = ending[:-1].rstrip()
+    match = re.search(r'(?i)(?<!\w)(yolo|boom|hold)$', ending)
+    if match is None:
+        return transcript, None
+    cue = match.group(1).lower()
+    if cue == 'hold' and not allow_hold:
+        return transcript, None
+    message = ending[:match.start()].rstrip(' \t\r\n,;:([{\"\'“‘')
+    if not message and cue != 'hold':
+        return transcript, None
+    return message, 'hold' if cue == 'hold' else 'send'
 
 
 def append_timing(session, recording_seconds, processing_seconds, status):
@@ -1026,29 +1045,36 @@ class Dictation:
     def _text_event(self, session, transcript):
         if self.session is not session:
             return False
-        self.live.set_text(transcript[-300:])
         if not transcript:
+            self.live.set_text('')
             self.status.set_text('No speech recognized · audio saved in History')
             self.delivery_error = True
             return False
+        message, cue = split_terminal_cue(
+            transcript, allow_hold=self.mode == 'cursor' and self.enter_button.get_active())
+        self.live.set_text(message[-300:])
+        if cue == 'hold' and not message:
+            return False
         if self.mode == 'buffer':
             buffer = self.text.get_buffer()
-            buffer.insert(buffer.get_end_iter(), transcript)
+            buffer.insert(buffer.get_end_iter(), message)
         else:
             if not self._target_focused():
                 self.delivery_error = True
                 buffer = self.text.get_buffer()
-                buffer.insert(buffer.get_end_iter(), transcript)
+                buffer.insert(buffer.get_end_iter(), message)
                 self.buffer_button.set_active(True)
                 self.status.set_text('Caret focus changed · transcript kept in Buffer')
                 return False
-            if not self._type_target(transcript):
+            if not self._type_target(message):
                 self.delivery_error = True
                 buffer = self.text.get_buffer()
-                buffer.insert(buffer.get_end_iter(), transcript)
+                buffer.insert(buffer.get_end_iter(), message)
                 self.buffer_button.set_active(True)
                 self.status.set_text('Could not type at caret · transcript kept in Buffer')
-            elif self.enter_button.get_active() and not self._press_enter():
+            elif ((cue == 'send' or
+                   (self.enter_button.get_active() and cue != 'hold')) and
+                  not self._press_enter()):
                 self.delivery_error = True
                 self.status.set_text('Text inserted · Enter could not be pressed')
         return False

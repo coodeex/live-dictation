@@ -27,6 +27,10 @@ GTK widgets are updated on the GTK thread. Microphone capture runs in a worker t
 
 The small **↵** toggle is off by default. In Caret mode, enabling it presses the Enter key after successful text insertion, provided the original target still has focus. The target application decides whether Enter sends the message or inserts a line break. The setting persists between sessions and has no effect in Buffer mode.
 
+In Caret mode, ending a dictation with **YOLO** or **boom** also presses Enter after successful insertion, even if **↵** is off. Case and trailing punctuation do not matter. The cue is removed from the text delivered to the target (or Buffer if delivery falls back), while the exact Azure transcript stays in History. Buffer mode does not press Enter.
+
+When **↵** is on, a final **hold** overrides it: the app inserts the text without pressing Enter and removes the spoken cue. With **↵** off, “hold” stays ordinary dictated text. A dictation containing only “hold” leaves the current draft untouched.
+
 The **♫** toggle is also off by default and persists between sessions. When recording starts, it pauses MPRIS players that are currently playing and remembers which player instances it paused. It resumes only those same instances after microphone capture stops, including when the recording is cancelled or capture fails. Turning the toggle on during recording pauses music then; turning it off resumes music it paused.
 
 **Buffer** appends the completed transcript to the GTK text editor. You can edit the result and copy it from the icon in the editor. The destination selected when transcription finishes receives the text. The popup shows elapsed recording time beside the waveform and, after F4, elapsed time from F4 to completed transcription. Caret mode shows both final times for three seconds before closing; Buffer mode leaves them visible for review and copying.
