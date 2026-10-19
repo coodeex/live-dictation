@@ -22,9 +22,10 @@ import wave
 import gi
 gi.require_version('Gtk', '3.0')
 gi.require_version('Gdk', '3.0')
+gi.require_version('Gio', '2.0')
 gi.require_version('Atspi', '2.0')
 gi.require_version('Pango', '1.0')
-from gi.repository import Atspi, Gdk, GLib, Gtk, Pango
+from gi.repository import Atspi, Gdk, Gio, GLib, Gtk, Pango
 
 ROOT = pathlib.Path.home() / '.local/share/live-dictation'
 HISTORY = ROOT / 'history'
@@ -205,7 +206,7 @@ class Dictation:
         os.chmod(HISTORY, 0o700)
         TIMINGS.touch(mode=0o600, exist_ok=True)
         os.chmod(TIMINGS, 0o600)
-        self.prefs = {'mode': 'cursor', 'press_enter': False}
+        self.prefs = {'mode': 'cursor', 'press_enter': False, 'pause_music': False}
         if SETTINGS.exists():
             try:
                 self.prefs.update(json.loads(SETTINGS.read_text()))
@@ -232,6 +233,7 @@ class Dictation:
         self.record_seconds = 0.0
         self.processing_started = None
         self.processing_seconds = None
+        self.paused_players = {}
         self._install_css()
         self._build_ui()
         self._socket_setup()
@@ -329,6 +331,15 @@ class Dictation:
         self.enter_button.get_style_context().add_class('ld-enter-toggle')
         self.enter_button.connect('toggled', self._enter_changed)
         header_row.pack_start(self.enter_button, False, False, 0)
+        self.music_button = Gtk.ToggleButton(label='♫')
+        self.music_button.set_relief(Gtk.ReliefStyle.NONE)
+        self.music_button.set_can_focus(False)
+        self.music_button.set_size_request(24, 24)
+        self.music_button.set_active(self.prefs.get('pause_music') is True)
+        self.music_button.set_tooltip_text('Pause playing media during dictation')
+        self.music_button.get_style_context().add_class('ld-music-toggle')
+        self.music_button.connect('toggled', self._music_changed)
+        header_row.pack_start(self.music_button, False, False, 0)
         close = Gtk.Button(label='−')
         close.set_relief(Gtk.ReliefStyle.NONE)
         close.set_can_focus(False)
@@ -625,6 +636,77 @@ class Dictation:
         self.prefs['press_enter'] = button.get_active()
         self._save_prefs()
 
+    def _music_changed(self, button):
+        self.prefs['pause_music'] = button.get_active()
+        self._save_prefs()
+        if self.stop_event is not None and not self.stop_event.is_set():
+            if button.get_active():
+                self._pause_music()
+            else:
+                self._resume_music()
+
+    @staticmethod
+    def _mpris_call(bus, destination, path, interface, method, parameters=None,
+                    reply_type=None):
+        return bus.call_sync(destination, path, interface, method, parameters,
+                             reply_type, Gio.DBusCallFlags.NONE, 1000, None)
+
+    def _mpris_owner(self, bus, name):
+        reply = self._mpris_call(bus, 'org.freedesktop.DBus', '/org/freedesktop/DBus',
+                                 'org.freedesktop.DBus', 'GetNameOwner',
+                                 GLib.Variant('(s)', (name,)), GLib.VariantType('(s)'))
+        return reply.unpack()[0]
+
+    def _mpris_status(self, bus, name):
+        reply = self._mpris_call(bus, name, '/org/mpris/MediaPlayer2',
+                                 'org.freedesktop.DBus.Properties', 'Get',
+                                 GLib.Variant('(ss)', ('org.mpris.MediaPlayer2.Player',
+                                                        'PlaybackStatus')),
+                                 GLib.VariantType('(v)'))
+        return reply.get_child_value(0).get_variant().get_string()
+
+    def _pause_music(self):
+        try:
+            bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+            names = self._mpris_call(bus, 'org.freedesktop.DBus',
+                                      '/org/freedesktop/DBus', 'org.freedesktop.DBus',
+                                      'ListNames', reply_type=GLib.VariantType('(as)'))
+        except GLib.Error as error:
+            print(f'Could not inspect media players: {error}', file=sys.stderr)
+            return
+        for name in names.unpack()[0]:
+            if not name.startswith('org.mpris.MediaPlayer2.') or name in self.paused_players:
+                continue
+            try:
+                owner = self._mpris_owner(bus, name)
+                if self._mpris_status(bus, name) != 'Playing':
+                    continue
+                self._mpris_call(bus, name, '/org/mpris/MediaPlayer2',
+                                 'org.mpris.MediaPlayer2.Player', 'Pause')
+                self.paused_players[name] = owner
+            except GLib.Error as error:
+                print(f'Could not pause {name}: {error}', file=sys.stderr)
+
+    def _resume_music(self):
+        paused = self.paused_players
+        self.paused_players = {}
+        if not paused:
+            return False
+        try:
+            bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+        except GLib.Error as error:
+            print(f'Could not reconnect to media players: {error}', file=sys.stderr)
+            return False
+        for name, owner in paused.items():
+            try:
+                if (self._mpris_owner(bus, name) == owner and
+                        self._mpris_status(bus, name) == 'Paused'):
+                    self._mpris_call(bus, name, '/org/mpris/MediaPlayer2',
+                                     'org.mpris.MediaPlayer2.Player', 'Play')
+            except GLib.Error as error:
+                print(f'Could not resume {name}: {error}', file=sys.stderr)
+        return False
+
     def _mode_changed(self, button):
         if not button.get_active():
             return
@@ -788,8 +870,11 @@ class Dictation:
             self.worker = threading.Thread(target=self._run_thread,
                                            args=(key, self.session, self.stop_event, self.cancel_event),
                                            daemon=True)
+            if self.music_button.get_active():
+                self._pause_music()
             self.worker.start()
         except Exception as error:
+            self._resume_music()
             self.status.set_text(f'Start failed: {error}')
 
     def _cancel_recording(self, *_args):
@@ -822,7 +907,10 @@ class Dictation:
     def _run_thread(self, key, session, stop, cancel):
         result = 'complete'
         try:
-            asyncio.run(self._capture(session, stop))
+            try:
+                asyncio.run(self._capture(session, stop))
+            finally:
+                GLib.idle_add(self._resume_music)
             session.close_audio()
             if cancel.is_set():
                 result = 'cancelled'
@@ -966,6 +1054,7 @@ class Dictation:
         return False
 
     def _finished(self, result, recording_seconds, processing_seconds):
+        self._resume_music()
         if self.timing_timer is not None:
             GLib.source_remove(self.timing_timer)
             self.timing_timer = None

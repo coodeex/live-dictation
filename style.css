@@ -99,7 +99,8 @@ window.ld-opaque { background: #10251f; }
     border-color: rgba(255,255,255,0.20);
 }
 
-.ld-enter-toggle {
+.ld-enter-toggle,
+.ld-music-toggle {
     background-image: none;
     background-color: rgba(209,250,229,0.07);
     color: rgba(236,253,245,0.72);
@@ -113,13 +114,16 @@ window.ld-opaque { background: #10251f; }
     font-size: 17px;
     font-weight: 600;
 }
-.ld-enter-toggle:hover { background-color: rgba(209,250,229,0.14); }
-.ld-enter-toggle:checked {
+.ld-enter-toggle:hover,
+.ld-music-toggle:hover { background-color: rgba(209,250,229,0.14); }
+.ld-enter-toggle:checked,
+.ld-music-toggle:checked {
     background-image: linear-gradient(180deg, @ld_accent, @ld_accent2);
     color: @ld_on_accent;
     border-color: rgba(255,255,255,0.20);
 }
-.ld-enter-toggle:disabled { opacity: 0.48; }
+.ld-enter-toggle:disabled,
+.ld-music-toggle:disabled { opacity: 0.48; }
 
 .ld-close {
     background-image: none;

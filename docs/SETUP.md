@@ -14,6 +14,8 @@ cd live-dictation
 
 No PyPI packages are required. `ffmpeg` compresses recordings that exceed the file endpoint's upload limit; the original WAV remains in local History. On other distributions, install equivalent GTK 3, AT-SPI, PulseAudio client, and FFmpeg packages.
 
+The optional **♫** toggle controls playing media through the desktop MPRIS interface. It needs a player that exposes MPRIS; no separate media-control command is required.
+
 ## 2. Configure Azure privately
 
 Copy the safe example to your user config directory, **outside the repository**:
