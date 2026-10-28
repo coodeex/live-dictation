@@ -42,6 +42,10 @@ CONFIG_PATH = pathlib.Path(os.environ.get(
     'LIVE_DICTATION_CONFIG', CONFIG_HOME / 'live-dictation/config.json')).expanduser()
 BRIDGE = 'org.gnome.Shell.Extensions.LiveDictation'
 BRIDGE_PATH = '/org/gnome/Shell/Extensions/LiveDictation'
+HISTORY_PAGE_SIZE = 10
+COMPACT_WINDOW_SIZE = (534, 334)
+HISTORY_WINDOW_SIZE = (620, 700)
+WORD_CORRECTIONS = {'Klarvo': 'Clarvo'}
 
 
 def load_config():
@@ -150,6 +154,20 @@ def split_terminal_cue(transcript, allow_hold=False):
     return message, 'hold' if cue == 'hold' else 'send'
 
 
+def normalize_letter_plus(text):
+    """Treat a plus between two ASCII letters as a word separator."""
+    return re.sub(r'(?<=[A-Za-z])\+(?=[A-Za-z])', ' ', text)
+
+
+def normalize_transcript_for_display(text):
+    """Apply small, explicit corrections without changing the raw history."""
+    text = normalize_letter_plus(text)
+    for heard, preferred in WORD_CORRECTIONS.items():
+        text = re.sub(rf'(?<!\w){re.escape(heard)}(?!\w)', lambda _match: preferred, text,
+                      flags=re.IGNORECASE)
+    return text
+
+
 def append_timing(session, recording_seconds, processing_seconds, status):
     entry = {
         'session': session.path.name,
@@ -163,6 +181,53 @@ def append_timing(session, recording_seconds, processing_seconds, status):
     with os.fdopen(descriptor, 'a', encoding='utf-8') as log:
         log.write(json.dumps(entry, ensure_ascii=False) + '\n')
     os.chmod(TIMINGS, 0o600)
+
+
+def history_page(page, root=HISTORY, timings_path=TIMINGS):
+    """Load one page of finished transcripts, newest first."""
+    sessions = sorted((path for path in root.iterdir() if path.is_dir() and
+                       (path / 'transcript.txt').is_file() and
+                       (path / 'transcript.txt').stat().st_size > 1),
+                      key=lambda path: path.name, reverse=True)
+    total_pages = max(1, (len(sessions) + HISTORY_PAGE_SIZE - 1) // HISTORY_PAGE_SIZE)
+    page = max(0, min(page, total_pages - 1))
+    timings = {}
+    try:
+        with timings_path.open(encoding='utf-8') as source:
+            for line in source:
+                try:
+                    entry = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(entry, dict) and isinstance(entry.get('session'), str):
+                    timings[entry['session']] = entry
+    except OSError:
+        pass
+    items = []
+    for path in sessions[page * HISTORY_PAGE_SIZE:(page + 1) * HISTORY_PAGE_SIZE]:
+        try:
+            transcript = normalize_transcript_for_display(
+                (path / 'transcript.txt').read_text(encoding='utf-8').rstrip('\n'))
+            metadata = json.loads((path / 'metadata.json').read_text(encoding='utf-8'))
+        except (OSError, ValueError):
+            continue
+        timing = timings.get(path.name, {})
+        recording = timing.get('recording_seconds')
+        if not isinstance(recording, (int, float)):
+            try:
+                with wave.open(str(path / 'audio.wav'), 'rb') as audio:
+                    recording = audio.getnframes() / audio.getframerate()
+            except (OSError, EOFError, wave.Error, ZeroDivisionError):
+                recording = None
+        started = metadata.get('started') if isinstance(metadata, dict) else None
+        try:
+            stamp = dt.datetime.fromisoformat(started).astimezone()
+        except (TypeError, ValueError):
+            stamp = dt.datetime.fromtimestamp(path.stat().st_mtime).astimezone()
+        items.append({'transcript': transcript, 'started': stamp,
+                      'recording_seconds': recording,
+                      'processing_seconds': timing.get('processing_seconds')})
+    return items, page, total_pages
 
 
 class Session:
@@ -245,6 +310,9 @@ class Dictation:
         self.wave_active = False
         self.wave_processing = False
         self.wave_timer = None
+        self.voice_frames = 0
+        self.mic_warning_timer = None
+        self.mic_warning_dialog = None
         self.copy_feedback_timer = None
         self.timing_timer = None
         self.close_timer = None
@@ -253,6 +321,7 @@ class Dictation:
         self.processing_started = None
         self.processing_seconds = None
         self.paused_players = {}
+        self.history_page_number = 0
         self._install_css()
         self._build_ui()
         self._socket_setup()
@@ -270,8 +339,8 @@ class Dictation:
     def _build_ui(self):
         w = self.window = Gtk.Window(title='Live dictation')
         w.set_wmclass('live-dictation', 'live-dictation')
-        w.set_default_size(534, 334)
-        w.set_size_request(534, 334)
+        w.set_default_size(*COMPACT_WINDOW_SIZE)
+        w.set_size_request(*COMPACT_WINDOW_SIZE)
         w.set_resizable(False)
         w.set_keep_above(True)
         w.set_decorated(False)
@@ -285,14 +354,20 @@ class Dictation:
             w.get_style_context().add_class('ld-opaque')
         w.set_focus_on_map(False)
         w.set_accept_focus(self.mode == 'buffer')
-        w.connect('delete-event', self._minimize)
+        w.connect('delete-event', self._close_popup)
 
         card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
         card.get_style_context().add_class('ld-card')
         w.add(card)
+        self.view_stack = Gtk.Stack()
+        self.view_stack.set_hhomogeneous(False)
+        self.view_stack.set_vhomogeneous(False)
+        card.pack_start(self.view_stack, True, True, 0)
+        dictation_view = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        self.view_stack.add_named(dictation_view, 'dictation')
 
         header = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
-        card.pack_start(header, False, False, 0)
+        dictation_view.pack_start(header, False, False, 0)
         drag_strip = Gtk.EventBox()
         drag_strip.set_visible_window(True)
         drag_strip.set_size_request(-1, 10)
@@ -359,13 +434,13 @@ class Dictation:
         self.music_button.get_style_context().add_class('ld-music-toggle')
         self.music_button.connect('toggled', self._music_changed)
         header_row.pack_start(self.music_button, False, False, 0)
-        close = Gtk.Button(label='−')
+        close = Gtk.Button(label='×')
         close.set_relief(Gtk.ReliefStyle.NONE)
         close.set_can_focus(False)
         close.set_size_request(22, 22)
-        close.set_tooltip_text('Minimize popup')
+        close.set_tooltip_text('Close popup')
         close.get_style_context().add_class('ld-close')
-        close.connect('clicked', self._minimize)
+        close.connect('clicked', self._close_popup)
         header_row.pack_start(close, False, False, 0)
 
         self.live = Gtk.Label(label='')
@@ -378,7 +453,7 @@ class Dictation:
         self.live.set_size_request(-1, 36)
         self.live.get_style_context().add_class('ld-live')
         live_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        card.pack_start(live_row, False, False, 0)
+        dictation_view.pack_start(live_row, False, False, 0)
         self.timing = Gtk.Label(label='0:00')
         self.timing.set_xalign(0)
         self.timing.set_width_chars(13)
@@ -394,7 +469,7 @@ class Dictation:
         wave_frame.add(self.waveform)
         self.wave_frame = wave_frame
         editor_overlay = Gtk.Overlay()
-        card.pack_start(editor_overlay, True, True, 0)
+        dictation_view.pack_start(editor_overlay, True, True, 0)
         scroll = Gtk.ScrolledWindow()
         scroll.set_size_request(-1, 95)
         scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
@@ -405,7 +480,7 @@ class Dictation:
         self.text = Gtk.TextView()
         self.text.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
         self.text.set_left_margin(10)
-        self.text.set_right_margin(44)
+        self.text.set_right_margin(78)
         self.text.set_top_margin(8)
         self.text.set_bottom_margin(8)
         self.text.get_style_context().add_class('ld-editor')
@@ -418,33 +493,257 @@ class Dictation:
         self.copy_button.set_relief(Gtk.ReliefStyle.NONE)
         self.copy_button.set_can_focus(False)
         self.copy_button.set_size_request(28, 28)
-        self.copy_button.set_halign(Gtk.Align.END)
-        self.copy_button.set_valign(Gtk.Align.START)
-        self.copy_button.set_margin_top(8)
-        self.copy_button.set_margin_end(8)
         self.copy_button.set_tooltip_text('Copy buffer')
         self.copy_button.get_style_context().add_class('ld-copy-icon')
         self.copy_button.connect('clicked', self._copy)
-        editor_overlay.add_overlay(self.copy_button)
+        self.clear_button = Gtk.Button(
+            image=Gtk.Image.new_from_icon_name('edit-clear-symbolic', Gtk.IconSize.MENU)
+        )
+        self.clear_button.set_relief(Gtk.ReliefStyle.NONE)
+        self.clear_button.set_can_focus(False)
+        self.clear_button.set_size_request(28, 28)
+        self.clear_button.set_tooltip_text('Clear buffer')
+        self.clear_button.get_style_context().add_class('ld-copy-icon')
+        self.clear_button.connect('clicked', self._confirm_clear_buffer)
+        editor_actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        editor_actions.set_halign(Gtk.Align.END)
+        editor_actions.set_valign(Gtk.Align.START)
+        editor_actions.set_margin_top(8)
+        editor_actions.set_margin_end(8)
+        editor_actions.pack_start(self.clear_button, False, False, 0)
+        editor_actions.pack_start(self.copy_button, False, False, 0)
+        editor_overlay.add_overlay(editor_actions)
 
         buttons = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        card.pack_start(buttons, False, False, 0)
+        dictation_view.pack_start(buttons, False, False, 0)
         self.cancel_button = Gtk.Button(label='Cancel')
         self.cancel_button.set_no_show_all(True)
         self.cancel_button.get_style_context().add_class('ld-ghost')
         self.cancel_button.connect('clicked', self._cancel_recording)
         buttons.pack_start(self.cancel_button, False, False, 0)
         buttons.pack_start(Gtk.Box(), True, True, 0)
-        history = Gtk.Button(label='History')
-        history.connect('clicked', lambda *_: subprocess.Popen(['xdg-open', str(HISTORY)]))
-        history.get_style_context().add_class('ld-ghost')
-        buttons.pack_start(history, False, False, 0)
+        self.history_button = Gtk.Button(label='History')
+        self.history_button.connect('clicked', self._show_history)
+        self.history_button.get_style_context().add_class('ld-ghost')
+        buttons.pack_start(self.history_button, False, False, 0)
         self.toggle_button = Gtk.Button(label='Start · F4')
         self.toggle_button.connect('clicked', lambda *_: self.toggle())
         self.toggle_button.get_style_context().add_class('ld-primary')
         buttons.pack_start(self.toggle_button, False, False, 0)
+        self._build_history_view()
+        self.view_stack.set_visible_child_name('dictation')
         self.window.show_all()
         self.window.hide()
+
+    def _build_history_view(self):
+        view = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        self.view_stack.add_named(view, 'history')
+
+        drag_strip = Gtk.EventBox()
+        drag_strip.set_visible_window(True)
+        drag_strip.set_size_request(-1, 10)
+        drag_strip.get_style_context().add_class('ld-drag-area')
+        drag_strip.connect('button-press-event', self._drag)
+        drag_strip.connect('realize', self._set_drag_cursor)
+        view.pack_start(drag_strip, False, False, 0)
+
+        header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        view.pack_start(header, False, False, 0)
+        back = Gtk.Button(label='← Back')
+        back.get_style_context().add_class('ld-ghost')
+        back.connect('clicked', self._back_from_history)
+        header.pack_start(back, False, False, 0)
+        title_handle = Gtk.EventBox()
+        title_handle.set_visible_window(True)
+        title_handle.get_style_context().add_class('ld-drag-area')
+        title_handle.connect('button-press-event', self._drag)
+        title_handle.connect('realize', self._set_drag_cursor)
+        header.pack_start(title_handle, True, True, 0)
+        title = Gtk.Label(label='History')
+        title.set_xalign(0)
+        title.get_style_context().add_class('ld-title')
+        title_handle.add(title)
+        close = Gtk.Button(label='×')
+        close.set_relief(Gtk.ReliefStyle.NONE)
+        close.set_can_focus(False)
+        close.set_size_request(22, 22)
+        close.set_tooltip_text('Close popup')
+        close.get_style_context().add_class('ld-close')
+        close.connect('clicked', self._close_popup)
+        header.pack_end(close, False, False, 0)
+
+        self.history_scroller = Gtk.ScrolledWindow()
+        self.history_scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        self.history_scroller.set_overlay_scrolling(True)
+        self.history_scroller.set_shadow_type(Gtk.ShadowType.NONE)
+        self.history_scroller.get_style_context().add_class('ld-history-scroll')
+        view.pack_start(self.history_scroller, True, True, 0)
+        self.history_list = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        self.history_list.set_margin_end(4)
+        viewport = Gtk.Viewport()
+        viewport.set_shadow_type(Gtk.ShadowType.NONE)
+        viewport.add(self.history_list)
+        self.history_scroller.add(viewport)
+
+        pager = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        view.pack_end(pager, False, False, 0)
+        self.history_previous = Gtk.Button(label='← Newer')
+        self.history_previous.get_style_context().add_class('ld-ghost')
+        self.history_previous.connect('clicked', lambda *_: self._change_history_page(-1))
+        pager.pack_start(self.history_previous, False, False, 0)
+        self.history_page_label = Gtk.Label()
+        self.history_page_label.get_style_context().add_class('ld-history-page')
+        pager.pack_start(self.history_page_label, True, True, 0)
+        self.history_next = Gtk.Button(label='Older →')
+        self.history_next.get_style_context().add_class('ld-ghost')
+        self.history_next.connect('clicked', lambda *_: self._change_history_page(1))
+        pager.pack_end(self.history_next, False, False, 0)
+
+    @staticmethod
+    def _history_duration(seconds):
+        if not isinstance(seconds, (int, float)) or seconds < 0:
+            return '—'
+        whole = int(seconds)
+        return f'{whole // 60}:{whole % 60:02d}'
+
+    def _history_card(self, item):
+        card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        card.get_style_context().add_class('ld-history-card')
+        heading = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        card.pack_start(heading, False, False, 0)
+        date = item['started'].strftime('%d %b %Y · %H:%M')
+        date_label = Gtk.Label(label=date)
+        date_label.set_xalign(0)
+        date_label.get_style_context().add_class('ld-history-date')
+        heading.pack_start(date_label, True, True, 0)
+        durations = (f"Recording {self._history_duration(item['recording_seconds'])}"
+                     f"  ·  Processing {self._history_duration(item['processing_seconds'])}")
+        duration_label = Gtk.Label(label=durations)
+        duration_label.get_style_context().add_class('ld-history-duration')
+        heading.pack_end(duration_label, False, False, 0)
+
+        excerpt = ' '.join(item['transcript'].split())
+        preview = Gtk.Label(label=excerpt[:100] + ('…' if len(excerpt) > 100 else ''))
+        preview.set_xalign(0)
+        preview.set_line_wrap(True)
+        preview.set_line_wrap_mode(Pango.WrapMode.WORD_CHAR)
+        preview.set_no_show_all(True)
+        preview.get_style_context().add_class('ld-history-preview')
+        card.pack_start(preview, False, False, 0)
+
+        full = Gtk.ScrolledWindow()
+        full.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        full.set_overlay_scrolling(True)
+        full.set_shadow_type(Gtk.ShadowType.NONE)
+        full.set_size_request(-1, 170)
+        full.set_no_show_all(True)
+        full.get_style_context().add_class('ld-history-full')
+        full_text = Gtk.TextView()
+        full_text.set_editable(False)
+        full_text.set_cursor_visible(False)
+        full_text.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
+        full_text.set_left_margin(10)
+        full_text.set_right_margin(10)
+        full_text.set_top_margin(8)
+        full_text.set_bottom_margin(8)
+        full_text.get_style_context().add_class('ld-history-text')
+        full_text.get_buffer().set_text(item['transcript'])
+        full.add(full_text)
+        card.pack_start(full, False, False, 0)
+
+        actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        card.pack_start(actions, False, False, 0)
+        actions.pack_start(Gtk.Box(), True, True, 0)
+        copy = Gtk.Button(label='Copy')
+        copy.get_style_context().add_class('ld-ghost')
+        copy.connect('clicked', self._copy_history, item['transcript'])
+        actions.pack_start(copy, False, False, 0)
+        expand = Gtk.Button(label='Expand')
+        expand.get_style_context().add_class('ld-ghost')
+        def toggle_expansion(button):
+            expanded = not full.get_visible()
+            full.set_visible(expanded)
+            preview.set_visible(not expanded)
+            button.set_label('Collapse' if expanded else 'Expand')
+
+        expand.connect('clicked', toggle_expansion)
+        actions.pack_start(expand, False, False, 0)
+        card.show_all()
+        full_text.show()
+        full.hide()
+        preview.show()
+        return card
+
+    def _copy_history(self, button, transcript):
+        Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD).set_text(transcript, -1)
+        button.set_label('✓ Copied')
+        GLib.timeout_add(2000, self._reset_history_copy, button)
+
+    @staticmethod
+    def _reset_history_copy(button):
+        try:
+            button.set_label('Copy')
+        except RuntimeError:
+            pass  # The card may have been destroyed by paging or Back.
+        return False
+
+    def _render_history_page(self):
+        for child in self.history_list.get_children():
+            child.destroy()
+        try:
+            items, self.history_page_number, total_pages = history_page(
+                self.history_page_number)
+        except OSError as error:
+            items, total_pages = [], 1
+            message = Gtk.Label(label=f'Could not load history: {error}')
+            message.get_style_context().add_class('ld-history-empty')
+            self.history_list.pack_start(message, False, False, 0)
+        if not items and not self.history_list.get_children():
+            empty = Gtk.Label(label='No saved transcriptions yet')
+            empty.get_style_context().add_class('ld-history-empty')
+            self.history_list.pack_start(empty, False, False, 0)
+        for item in items:
+            self.history_list.pack_start(self._history_card(item), False, False, 0)
+        self.history_list.show_all()
+        self.history_page_label.set_text(f'{self.history_page_number + 1} / {total_pages}')
+        self.history_previous.set_sensitive(self.history_page_number > 0)
+        self.history_next.set_sensitive(self.history_page_number + 1 < total_pages)
+        self.history_scroller.get_vadjustment().set_value(0)
+
+    def _change_history_page(self, delta):
+        self.history_page_number += delta
+        self._render_history_page()
+
+    def _show_history(self, *_args):
+        if self.stop_event is not None:
+            return
+        self._cancel_close_timer()
+        if self.mode == 'cursor' and not self.window.has_toplevel_focus():
+            current = focused_accessible()
+            if current is not None:
+                self.target_accessible = current
+        self.history_page_number = 0
+        self._render_history_page()
+        self.view_stack.set_visible_child_name('history')
+        self.window.set_accept_focus(True)
+        self.window.set_size_request(*HISTORY_WINDOW_SIZE)
+        self.window.resize(*HISTORY_WINDOW_SIZE)
+        self.window.present()
+        GLib.idle_add(self._reposition_top_right)
+        GLib.timeout_add(100, self._reposition_top_right)
+        self._ensure_topmost()
+
+    def _back_from_history(self, *_args):
+        if self.view_stack.get_visible_child_name() != 'history':
+            return
+        self.view_stack.set_visible_child_name('dictation')
+        self.window.set_size_request(*COMPACT_WINDOW_SIZE)
+        self.window.resize(*COMPACT_WINDOW_SIZE)
+        self.window.set_accept_focus(self.mode == 'buffer')
+        GLib.idle_add(self._reposition_top_right)
+        GLib.timeout_add(100, self._reposition_top_right)
+        if self.mode == 'cursor':
+            self._restore_target()
 
     def _set_drag_cursor(self, widget):
         widget.get_window().set_cursor(Gdk.Cursor.new_from_name(widget.get_display(), 'move'))
@@ -521,10 +820,52 @@ class Dictation:
                 self.wave_timer = None
         self.waveform.queue_draw()
 
-    def _set_wave_level(self, session, level):
+    def _set_wave_level(self, session, level, rms):
         if self.session is session and self.wave_active:
             self.wave_level = level
+            if rms >= 400:
+                self.voice_frames += 1
+            elif self.voice_frames < 3:
+                self.voice_frames = 0
         return False
+
+    def _check_initial_voice(self, session):
+        self.mic_warning_timer = None
+        if (self.session is not session or self.stop_event is None or
+                self.stop_event.is_set() or self.voice_frames >= 3):
+            return False
+        self.status.set_text('No voice detected · check microphone')
+        dialog = Gtk.MessageDialog(
+            transient_for=self.window,
+            modal=True,
+            destroy_with_parent=True,
+            message_type=Gtk.MessageType.WARNING,
+            buttons=Gtk.ButtonsType.CLOSE,
+            text='Your microphone may not be hearing you',
+        )
+        dialog.format_secondary_text(
+            'No voice was detected in the first 7 seconds. Check your microphone and input device.'
+        )
+        dialog.connect('response', self._close_mic_warning)
+        self.mic_warning_dialog = dialog
+        dialog.show_all()
+        return False
+
+    def _close_mic_warning(self, dialog, _response=None):
+        if self.mic_warning_dialog is dialog:
+            self.mic_warning_dialog = None
+        dialog.destroy()
+        if self.stop_event is not None and not self.stop_event.is_set() and self.mode == 'cursor':
+            GLib.timeout_add(150, self._restore_after_show)
+
+    def _dismiss_mic_warning(self):
+        if self.mic_warning_timer is not None:
+            GLib.source_remove(self.mic_warning_timer)
+            self.mic_warning_timer = None
+        if self.mic_warning_dialog is not None:
+            dialog = self.mic_warning_dialog
+            self.mic_warning_dialog = None
+            dialog.destroy()
 
     def _animate_waveform(self):
         if not self.wave_active and not self.wave_processing:
@@ -616,8 +957,11 @@ class Dictation:
             self.status.set_text(f'Control error: {error}')
         return True
 
-    def _minimize(self, *_args):
-        self.window.iconify()
+    def _close_popup(self, *_args):
+        self._cancel_close_timer()
+        if self.stop_event is not None and not self.stop_event.is_set():
+            self._cancel_recording()
+        self.window.hide()
         return True
 
     def _ensure_topmost(self):
@@ -637,11 +981,14 @@ class Dictation:
         width, height = self.window.get_size()
         return (max(area.x, area.x + area.width - width - 8), area.y + 8)
 
+    def _reposition_top_right(self):
+        self._move_window(*self._top_right_position())
+        return False
+
     def _open_top_right(self):
         position = self._top_right_position()
         self._move_window(*position)
         self.window.show_all()
-        self.window.deiconify()
         self._move_window(*position)
         GLib.idle_add(self._move_window, *position)
         self._ensure_topmost()
@@ -765,6 +1112,25 @@ class Dictation:
             GLib.source_remove(self.copy_feedback_timer)
         self.copy_feedback_timer = GLib.timeout_add(2000, self._reset_copy_icon)
 
+    def _confirm_clear_buffer(self, *_args):
+        dialog = Gtk.MessageDialog(
+            transient_for=self.window,
+            modal=True,
+            destroy_with_parent=True,
+            message_type=Gtk.MessageType.QUESTION,
+            buttons=Gtk.ButtonsType.NONE,
+            text='Clear buffer?',
+        )
+        dialog.format_secondary_text('Do you really want to clear the buffer?')
+        dialog.add_button('Cancel', Gtk.ResponseType.CANCEL)
+        dialog.add_button('Clear buffer', Gtk.ResponseType.ACCEPT)
+        dialog.set_default_response(Gtk.ResponseType.CANCEL)
+        response = dialog.run()
+        dialog.destroy()
+        if response == Gtk.ResponseType.ACCEPT:
+            self.text.get_buffer().set_text('')
+            self.status.set_text('Buffer cleared')
+
     def _reset_copy_icon(self):
         self.copy_icon.set_from_icon_name('edit-copy-symbolic', Gtk.IconSize.MENU)
         self.copy_button.get_style_context().remove_class('ld-copy-success')
@@ -837,6 +1203,7 @@ class Dictation:
         if self.stop_event is not None:
             if self.stop_event.is_set():
                 return
+            self._dismiss_mic_warning()
             self.record_seconds = time.monotonic() - self.record_started
             self.processing_started = time.monotonic()
             self.processing_seconds = None
@@ -851,6 +1218,7 @@ class Dictation:
             self.toggle_button.set_sensitive(False)
             self.status.set_text('')
             return
+        self._back_from_history()
         try:
             if not AZURE_ENDPOINT:
                 raise RuntimeError('Set azure_endpoint in the user config or AZURE_OPENAI_ENDPOINT')
@@ -876,11 +1244,13 @@ class Dictation:
             self.timing_timer = GLib.timeout_add(200, self._update_timing)
             self.audio_loop = None
             self.audio_proc = None
+            self.voice_frames = 0
             self._open_top_right()
             self._set_cancel_visible(True)
             if self.mode == 'cursor':
                 GLib.timeout_add(150, self._restore_after_show)
             self.toggle_button.set_label('Stop · F4')
+            self.history_button.set_sensitive(False)
             self.recording_dot.get_style_context().add_class('ld-dot-active')
             self._set_wave_processing(False)
             self._set_wave_active(True)
@@ -892,13 +1262,17 @@ class Dictation:
             if self.music_button.get_active():
                 self._pause_music()
             self.worker.start()
+            self.mic_warning_timer = GLib.timeout_add(7000, self._check_initial_voice, self.session)
         except Exception as error:
+            self._dismiss_mic_warning()
             self._resume_music()
+            self.history_button.set_sensitive(True)
             self.status.set_text(f'Start failed: {error}')
 
     def _cancel_recording(self, *_args):
         if self.stop_event is None or self.stop_event.is_set():
             return
+        self._dismiss_mic_warning()
         self.record_seconds = time.monotonic() - self.record_started
         self.record_started = None
         self.cancel_event.set()
@@ -907,8 +1281,9 @@ class Dictation:
         self._set_cancel_visible(False)
         self.recording_dot.get_style_context().remove_class('ld-dot-active')
         self._set_wave_active(False)
+        self.toggle_button.set_label('···')
         self.toggle_button.set_sensitive(False)
-        self.window.hide()
+        self.status.set_text('Cancelling…')
 
     def _stop_microphone_now(self):
         loop = self.audio_loop
@@ -982,7 +1357,7 @@ class Dictation:
                 meter_bytes = chunk[:len(chunk) & ~1]
                 rms = audioop.rms(meter_bytes, 2) if meter_bytes else 0
                 level = min(1.0, max(0.0, (rms - 160) / 3500))
-                GLib.idle_add(self._set_wave_level, session, level)
+                GLib.idle_add(self._set_wave_level, session, level, rms)
                 session.audio.writeframesraw(chunk)
         finally:
             self._terminate_microphone()
@@ -1045,6 +1420,7 @@ class Dictation:
     def _text_event(self, session, transcript):
         if self.session is not session:
             return False
+        transcript = normalize_transcript_for_display(transcript)
         if not transcript:
             self.live.set_text('')
             self.status.set_text('No speech recognized · audio saved in History')
@@ -1080,6 +1456,7 @@ class Dictation:
         return False
 
     def _finished(self, result, recording_seconds, processing_seconds):
+        self._dismiss_mic_warning()
         self._resume_music()
         if self.timing_timer is not None:
             GLib.source_remove(self.timing_timer)
@@ -1096,6 +1473,7 @@ class Dictation:
         self._set_wave_active(False)
         self.toggle_button.set_label('Start · F4')
         self.toggle_button.set_sensitive(True)
+        self.history_button.set_sensitive(True)
         self._set_cancel_visible(False)
         if result == 'complete':
             if not self.delivery_error:
@@ -1104,7 +1482,6 @@ class Dictation:
                 self.close_timer = GLib.timeout_add(3000, self._hide_completed)
         elif result == 'cancelled':
             self.status.set_text('Ready · F4 to start')
-            self.window.hide()
         return False
 
 

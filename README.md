@@ -23,7 +23,7 @@ The panel opens at the top right of your primary monitor. Drag it elsewhere whil
 - **One complete result.** Speech is transcribed after you stop, then inserted once.
 - **Your choice of destination.** Use the active caret for speed or the buffer for control.
 - **Quiet when you speak.** Optionally pause playing media during dictation and resume only what the app paused.
-- **A record you can revisit.** Audio, transcript, and session events are saved locally.
+- **A record you can revisit.** Browse and copy past transcripts in the popup; audio and session events stay in local history.
 - **A native desktop feel.** GTK 3, a draggable glass panel, a compact audio meter, and a single shortcut to start or stop.
 
 ## Bring your own Azure deployment

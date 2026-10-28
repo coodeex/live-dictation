@@ -37,7 +37,7 @@ ${EDITOR:-nano} ~/.config/live-dictation/azure.env
 
 Do not put the key in `config.example.json` or any file inside the clone. You can instead provide `AZURE_OPENAI_API_KEY` through the environment. Environment variables `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_DEPLOYMENT`, `AZURE_OPENAI_API_VERSION`, `AZURE_OPENAI_KEY_FILE`, and `LIVE_DICTATION_CONFIG` override their corresponding config values.
 
-`ydotool_keymap` is optional. Leave it empty for an ordinary US key layout; add character-to-key mappings if your layout needs them for the fallback typing method. The app prefers AT-SPI insertion and only uses this mapping when it falls back to `ydotool`.
+`ydotool_keymap` is optional. Leave it empty for an ordinary US key layout; add character-to-key mappings if your layout needs them for the fallback typing method. The app prefers AT-SPI insertion and only uses this mapping when it falls back to `ydotool`. On a Finnish layout, `"-": "/"` maps a dictated hyphen to the physical key that produces a hyphen; without it, the fallback can type `+` instead.
 
 ## 3. Try it in a terminal
 

@@ -215,3 +215,32 @@ textview.ld-editor text selection {
 }
 .ld-ghost:hover { background-color: rgba(209,250,229,0.16); }
 .ld-ghost:active { background-color: rgba(209,250,229,0.24); }
+
+.ld-history-scroll,
+.ld-history-scroll viewport {
+    background: transparent;
+    border: none;
+}
+.ld-history-card {
+    background-color: rgba(2, 14, 11, 0.30);
+    border: 1px solid rgba(167,243,208,0.12);
+    border-radius: 12px;
+    padding: 12px;
+    color: @ld_text;
+}
+.ld-history-date { color: @ld_text; font-size: 12px; font-weight: 600; }
+.ld-history-duration { color: @ld_muted; font-size: 11px; }
+.ld-history-preview { color: rgba(236,253,245,0.82); font-size: 13px; }
+.ld-history-page, .ld-history-empty { color: @ld_muted; font-size: 12px; }
+.ld-history-card .ld-ghost { padding: 4px 12px; font-size: 12px; }
+.ld-history-full {
+    background-color: rgba(2, 14, 11, 0.28);
+    border: 1px solid rgba(167,243,208,0.10);
+    border-radius: 8px;
+}
+textview.ld-history-text,
+textview.ld-history-text text {
+    background-color: transparent;
+    color: @ld_text;
+    font-size: 13px;
+}
