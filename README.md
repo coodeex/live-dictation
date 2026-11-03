@@ -2,7 +2,7 @@
 
 > **Speak naturally. Press stop. Let the words land.**
 
-Live Dictation is a small, always-on-top voice panel for GNOME on Linux. It records your speech locally, then transcribes it with Azure OpenAI when you stop. The finished text goes into the app you are using or an editable buffer.
+Live Dictation is a small, always-on-top voice panel for GNOME on Linux. It records your speech locally, then transcribes it when you stop. The finished text goes into the app you are using or an editable buffer.
 
 ![Live Dictation popup above an editor](assets/live-dictation.png)
 
@@ -27,9 +27,3 @@ The panel opens at the top right of your primary monitor. Drag it elsewhere whil
 - **Tidy up a long thought.** Optional Format mode uses AI to make rambling speech clearer and more concise while keeping your meaning. Formatted text waits for your review instead of sending automatically.
 - **Choose when to press Enter.** In Caret mode, enable automatic Enter for chat apps that send on Enter. End with **“hold”** to keep a draft when it is on, or **“boom”** to press Enter when it is off. The spoken cue is removed from the delivered text.
 - **Find it again.** Browse and copy past transcripts in the popup. Audio, text, and timing history stay on your machine.
-
-## Bring your own Azure deployment
-
-Clone the repo, install the Linux dependencies, and point a private user config at your Azure OpenAI `gpt-transcribe` deployment. The app uploads one completed audio file after you stop, so pauses do not end the recording. Credentials and recordings stay outside Git. The [setup guide](docs/SETUP.md) walks through the service, shortcut, and optional GNOME focus helper; [architecture notes](docs/ARCHITECTURE.md) explain the recording and transcription paths.
-
-Built and tested on Ubuntu with GNOME, GTK 3, and XWayland. Audio is sent to your configured Azure OpenAI resource for transcription.

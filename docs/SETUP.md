@@ -1,6 +1,6 @@
 # Set up Live Dictation
 
-Live Dictation currently targets a GNOME desktop on Linux. The popup uses GTK 3 through XWayland; the microphone is read through PulseAudio's `parec` command (also provided by PipeWire's PulseAudio compatibility layer). You need an Azure OpenAI resource with a `gpt-transcribe` file transcription deployment.
+Live Dictation is built and tested on Ubuntu with GNOME, GTK 3, and XWayland. The microphone is read through PulseAudio's `parec` command (also provided by PipeWire's PulseAudio compatibility layer). You need an Azure OpenAI resource with a `gpt-transcribe` file transcription deployment. The app uploads one completed audio file to that resource when you stop; pauses do not end the recording. Credentials, recordings, and transcripts stay outside the Git clone.
 
 ## 1. Install the app
 
