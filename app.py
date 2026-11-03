@@ -536,10 +536,16 @@ class Dictation:
         (self.cursor_button if self.mode == 'cursor' else self.buffer_button).set_active(True)
         self.cursor_button.connect('toggled', self._mode_changed)
         self.buffer_button.connect('toggled', self._mode_changed)
-        self.format_button = Gtk.ToggleButton(label='✦')
+        self.format_button = Gtk.ToggleButton()
         self.format_button.set_relief(Gtk.ReliefStyle.NONE)
         self.format_button.set_can_focus(False)
         self.format_button.set_size_request(24, 24)
+        self.format_icon = Gtk.DrawingArea()
+        self.format_icon.set_size_request(18, 18)
+        self.format_icon.set_halign(Gtk.Align.CENTER)
+        self.format_icon.set_valign(Gtk.Align.CENTER)
+        self.format_icon.connect('draw', self._draw_format_icon)
+        self.format_button.add(self.format_icon)
         self.format_button.set_active(self.prefs.get('format') is True)
         self.format_button.set_tooltip_text('Format dictated text with AI · never press Enter')
         self.format_button.get_style_context().add_class('ld-format-toggle')
@@ -550,7 +556,9 @@ class Dictation:
         self.grammar_button.set_can_focus(False)
         self.grammar_button.set_size_request(24, 24)
         self.grammar_icon = Gtk.DrawingArea()
-        self.grammar_icon.set_size_request(19, 19)
+        self.grammar_icon.set_size_request(16, 16)
+        self.grammar_icon.set_halign(Gtk.Align.CENTER)
+        self.grammar_icon.set_valign(Gtk.Align.CENTER)
         self.grammar_icon.connect('draw', self._draw_grammar_icon)
         self.grammar_button.add(self.grammar_icon)
         self.grammar_button.set_active(
@@ -1179,6 +1187,21 @@ class Dictation:
             self.grammar_button.set_active(False)
         self.prefs['format'] = button.get_active()
         self._save_prefs()
+        self.format_icon.queue_draw()
+
+    def _draw_format_icon(self, _widget, context):
+        color = self.format_button.get_style_context().get_color(
+            self.format_button.get_state_flags())
+        context.set_source_rgba(color.red, color.green, color.blue, color.alpha)
+        context.scale(self.format_icon.get_allocated_width() / 24.0,
+                      self.format_icon.get_allocated_height() / 24.0)
+        context.move_to(12, 3)
+        for x, y in ((14.3, 9.7), (21, 12), (14.3, 14.3), (12, 21),
+                     (9.7, 14.3), (3, 12), (9.7, 9.7)):
+            context.line_to(x, y)
+        context.close_path()
+        context.fill()
+        return False
 
     def _grammar_changed(self, button):
         if button.get_active() and self.format_button.get_active():
