@@ -73,9 +73,10 @@ GRAMMAR_PROMPT = ('Return the full dictated text with the same words, order, mea
                   'Do not summarize, shorten, or rephrase for style. Output only the revised text.')
 PASTE_RESTORE_DELAY_MS = 1200
 PASTE_VERIFY_TIMEOUT_SECONDS = 1.5
+# ydotool key takes shortcut names; numeric press/release tokens type garbage.
 PASTE_KEYS = {
-    'ctrl+v': ('29:1', '47:1', '47:0', '29:0'),
-    'ctrl+shift+v': ('29:1', '42:1', '47:1', '47:0', '42:0', '29:0'),
+    'ctrl+v': ('ctrl+v',),
+    'ctrl+shift+v': ('ctrl+shift+v',),
 }
 
 
@@ -1401,29 +1402,26 @@ class Dictation:
                        'command_timeout': None, 'process': None, 'timed_out': False,
                        'attempted': False}
         self.paste_transaction = transaction
+        try:
+            self.clipboard.set_text(value, -1)
+        except Exception as error:
+            print(f'Could not offer X11 clipboard text: {error}', file=sys.stderr)
+            self._request_paste_restore(transaction)
+            return
         threading.Thread(target=self._verify_paste_clipboard, args=(transaction,),
                          daemon=True).start()
 
     def _verify_paste_clipboard(self, transaction):
-        # Offer the text on the native Wayland clipboard, then verify exactly what
-        # the target app will see. Never send Ctrl+V while stale data is offered.
-        if shutil.which('wl-copy') is None or shutil.which('wl-paste') is None:
-            GLib.idle_add(self._paste_clipboard_verified, transaction, False)
-            return
-        try:
-            subprocess.run(['wl-copy'],
-                           input=transaction['value'].encode('utf-8'), timeout=3,
-                           check=True, stdout=subprocess.DEVNULL,
-                           stderr=subprocess.DEVNULL)
-        except (OSError, subprocess.SubprocessError) as error:
-            print(f'Could not offer Wayland clipboard text: {error}', file=sys.stderr)
+        # This popup and the target editor run under XWayland. Check the X11
+        # selection without invoking wl-paste, which can drop X11 input focus.
+        if shutil.which('xclip') is None:
             GLib.idle_add(self._paste_clipboard_verified, transaction, False)
             return
         deadline = time.monotonic() + PASTE_VERIFY_TIMEOUT_SECONDS
         while time.monotonic() < deadline:
             try:
-                result = subprocess.run(['wl-paste', '--no-newline'], capture_output=True,
-                                        timeout=0.5)
+                result = subprocess.run(['xclip', '-o', '-selection', 'clipboard'],
+                                        capture_output=True, timeout=0.5)
                 if result.returncode == 0 and result.stdout.decode('utf-8') == transaction['value']:
                     GLib.idle_add(self._paste_clipboard_verified, transaction, True)
                     return
@@ -1486,28 +1484,27 @@ class Dictation:
         if self.paste_transaction is not transaction:
             return False
         transaction['restore_timeout'] = GLib.timeout_add(
-            8000, self._paste_restore_timeout, transaction)
-        threading.Thread(target=self._restore_paste_clipboard,
-                         args=(transaction,), daemon=True).start()
+            2000, self._paste_restore_timeout, transaction)
+        try:
+            self.clipboard.request_text(self._paste_restore_received, transaction)
+        except Exception as error:
+            print(f'Could not inspect clipboard after paste: {error}', file=sys.stderr)
+            self._finish_paste(transaction)
         return False
 
-    def _restore_paste_clipboard(self, transaction):
+    def _paste_restore_received(self, clipboard, current_text, transaction):
+        if self.paste_transaction is not transaction:
+            return
         try:
-            current = subprocess.run(['wl-paste', '--no-newline'], capture_output=True,
-                                     timeout=2, check=True).stdout.decode('utf-8')
-            if self.paste_transaction is transaction and current == transaction['value']:
+            if current_text == transaction['value']:
                 if transaction['saved_text'] is not None:
-                    command = ['wl-copy']
-                    data = transaction['saved_text'].encode('utf-8')
+                    clipboard.set_text(transaction['saved_text'], -1)
                 else:
-                    command = ['wl-copy', '--clear']
-                    data = None
-                subprocess.run(command, input=data, timeout=3, check=True,
-                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    clipboard.clear()
         except Exception as error:
             print(f'Could not restore clipboard after paste: {error}', file=sys.stderr)
         finally:
-            GLib.idle_add(self._finish_paste, transaction)
+            self._finish_paste(transaction)
 
     def _paste_restore_timeout(self, transaction):
         if self.paste_transaction is transaction:

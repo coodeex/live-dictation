@@ -7,7 +7,7 @@ Live Dictation is built and tested on Ubuntu with GNOME, GTK 3, and XWayland. Th
 On Ubuntu, install the GTK introspection bindings and audio tools:
 
 ```bash
-sudo apt install python3-gi gir1.2-gtk-3.0 gir1.2-atspi-2.0 pulseaudio-utils xdg-utils libglib2.0-bin ffmpeg wl-clipboard
+sudo apt install python3-gi gir1.2-gtk-3.0 gir1.2-atspi-2.0 pulseaudio-utils xdg-utils libglib2.0-bin ffmpeg xclip
 git clone https://github.com/coodeex/live-dictation.git
 cd live-dictation
 ```
@@ -89,9 +89,9 @@ cp extension/extension.js extension/metadata.json ~/.local/share/gnome-shell/ext
 
 Log out and back in, then run `gnome-extensions enable live-dictation@coodeex`. Other GNOME versions may require adapting the extension metadata or API. Without the extension, the app uses AT-SPI focus restoration where possible.
 
-Caret mode sends a paste shortcut through `sudo -n ydotool key` after offering the transcript with native Wayland `wl-copy`. The optional **↵** toggle also uses `sudo -n ydotool key enter`. The original AT-SPI/`ydotool type` method remains available with `python3 client.py type`; switch back to paste with `python3 client.py paste`. The choice persists across restarts. These paths need `ydotool` and narrowly scoped, passwordless local permission for those commands. Buffer mode does not need them. Configure input injection according to your distribution's security model.
+Caret mode sends a paste shortcut through `sudo -n ydotool key ctrl+v` after offering the transcript on the X11 clipboard. The optional **↵** toggle also uses `sudo -n ydotool key enter`. The original AT-SPI/`ydotool type` method remains available with `python3 client.py type`; switch back to paste with `python3 client.py paste`. The choice persists across restarts. These paths need `ydotool` and narrowly scoped, passwordless local permission for those commands. Buffer mode does not need them. Configure input injection according to your distribution's security model.
 
-When F4 stops recording, the app saves the current text clipboard in memory. Before sending the paste shortcut, it checks with `wl-paste` that the Wayland clipboard contains the new transcript. If that check fails, it keeps the transcript in Buffer without typing it. After a paste, it restores the old text only if the clipboard still contains the dictation. Other clipboard formats may be lost; a clipboard-history app may record the temporary dictation. A shortcut accepted by the input tool cannot prove that the target app pasted. If the shortcut times out after starting, the app reports an uncertain result and keeps the transcript in History instead of typing a possible duplicate.
+When F4 stops recording, the app saves the current text clipboard in memory. Before sending the paste shortcut, it checks with `xclip` that the X11 clipboard contains the new transcript. If that check fails, it keeps the transcript in Buffer without typing it. After a paste, it restores the old text only if the clipboard still contains the dictation. Other clipboard formats may be lost; a clipboard-history app may record the temporary dictation. A shortcut accepted by the input tool cannot prove that the target app pasted. If the shortcut times out after starting, the app reports an uncertain result and keeps the transcript in History instead of typing a possible duplicate.
 
 ## Useful commands
 
