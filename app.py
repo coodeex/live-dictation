@@ -1543,7 +1543,8 @@ class Dictation:
         started = time.monotonic()
         typed = False
         try:
-            subprocess.run(['sudo', '-n', 'ydotool', 'type', '--key-delay', '1', '--file', '-'],
+            # Give Shift and AltGr time to settle on non-US keyboard layouts.
+            subprocess.run(['sudo', '-n', 'ydotool', 'type', '--key-delay', '12', '--file', '-'],
                            input=mapped, text=True, timeout=max(4, len(mapped) / 30), check=True,
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             typed = True
