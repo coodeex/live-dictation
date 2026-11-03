@@ -18,13 +18,15 @@ The panel opens at the top right of your primary monitor. Drag it elsewhere whil
 
 **[Get started →](docs/SETUP.md)** · **[See how it works →](docs/ARCHITECTURE.md)**
 
-## Made to stay out of the way
+## A few thoughtful controls
 
-- **One complete result.** Speech is transcribed after you stop, then inserted once.
-- **Your choice of destination.** Use the active caret for speed or the buffer for control.
-- **Quiet when you speak.** Optionally pause playing media during dictation and resume only what the app paused.
-- **A record you can revisit.** Browse and copy past transcripts in the popup; audio and session events stay in local history.
-- **A native desktop feel.** GTK 3, a draggable glass panel, a compact audio meter, and a single shortcut to start or stop.
+- **A little polish on your desktop.** A draggable, always-on-top GTK panel with translucent forest-green glass and a live audio meter that shows when the microphone hears you.
+- **Speak at your own pace.** Recording continues through pauses. When you stop, the app transcribes the whole take and inserts one complete result.
+- **Write where you want.** Paste into the active caret, or collect text in an editable buffer to review and copy. Switch destinations while recording.
+- **Keep the music, or pause it.** Toggle automatic media pause for dictation; the app resumes only the players it paused.
+- **Tidy up a long thought.** Optional Format mode uses AI to make rambling speech clearer and more concise while keeping your meaning. Formatted text waits for your review instead of sending automatically.
+- **Choose when to press Enter.** In Caret mode, enable automatic Enter for chat apps that send on Enter. End with **“hold”** to keep a draft when it is on, or **“boom”** to press Enter when it is off. The spoken cue is removed from the delivered text.
+- **Find it again.** Browse and copy past transcripts in the popup. Audio, text, and timing history stay on your machine.
 
 ## Bring your own Azure deployment
 

@@ -25,6 +25,7 @@ history/
 *.m4a
 *.jsonl
 transcript.txt
+formatted.txt
 buffer-draft.txt
 settings.json
 *.sqlite*

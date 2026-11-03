@@ -8,6 +8,7 @@ import math
 import os
 import pathlib
 import re
+import shutil
 import socket
 import subprocess
 import sys
@@ -46,6 +47,22 @@ HISTORY_PAGE_SIZE = 10
 COMPACT_WINDOW_SIZE = (534, 334)
 HISTORY_WINDOW_SIZE = (620, 700)
 WORD_CORRECTIONS = {'Klarvo': 'Clarvo'}
+FORMAT_PROMPT = ('Lead with the speaker\'s main point in the first sentence, using their own '
+                 'wording when possible. Keep a useful topic sentence, but cut conversational '
+                 'openers and filler. Examples of direct openings: "Could we move the meeting '
+                 'to Thursday?"; "I think we should simplify the signup flow."; "The new '
+                 'version is ready for review."; "The latest update is causing the app to '
+                 'freeze."; "I\'d like to go with the second option." These are style examples '
+                 'only; do not copy their facts into the text. '
+                 'Fix grammar, repetition, and capitalization, including the '
+                 'pronoun I. Make the text clearer and shorter while keeping the speaker\'s '
+                 'words and meaning. Add no facts or structure. Output only the revised text.')
+PASTE_RESTORE_DELAY_MS = 1200
+PASTE_VERIFY_TIMEOUT_SECONDS = 1.5
+PASTE_KEYS = {
+    'ctrl+v': ('29:1', '47:1', '47:0', '29:0'),
+    'ctrl+shift+v': ('29:1', '42:1', '47:1', '47:0', '42:0', '29:0'),
+}
 
 
 def load_config():
@@ -67,7 +84,14 @@ DEPLOYMENT = (os.environ.get('AZURE_OPENAI_DEPLOYMENT') or
               CONFIG.get('deployment') or 'gpt-transcribe')
 API_VERSION = (os.environ.get('AZURE_OPENAI_API_VERSION') or
                CONFIG.get('api_version') or '2025-03-01-preview')
+FORMAT_DEPLOYMENT = (os.environ.get('AZURE_OPENAI_FORMAT_DEPLOYMENT') or
+                     CONFIG.get('format_deployment') or '')
+FORMAT_API_VERSION = (os.environ.get('AZURE_OPENAI_FORMAT_API_VERSION') or
+                      CONFIG.get('format_api_version') or API_VERSION)
 KEYMAP = str.maketrans(CONFIG.get('ydotool_keymap', {}))
+PASTE_SHORTCUT = str(CONFIG.get('paste_shortcut', 'ctrl+v')).lower()
+if PASTE_SHORTCUT not in PASTE_KEYS:
+    raise RuntimeError('paste_shortcut must be ctrl+v or ctrl+shift+v')
 
 
 def api_key():
@@ -142,16 +166,16 @@ def split_terminal_cue(transcript, allow_hold=False):
     ending = transcript.rstrip()
     while ending and unicodedata.category(ending[-1])[0] in ('P', 'S'):
         ending = ending[:-1].rstrip()
-    match = re.search(r'(?i)(?<!\w)(yolo|boom|hold)$', ending)
+    match = re.search(r'(?i)(?<!\w)(yolo|boom|hold|format)$', ending)
     if match is None:
         return transcript, None
     cue = match.group(1).lower()
     if cue == 'hold' and not allow_hold:
         return transcript, None
     message = ending[:match.start()].rstrip(' \t\r\n,;:([{\"\'“‘')
-    if not message and cue != 'hold':
+    if not message and cue not in ('hold', 'format'):
         return transcript, None
-    return message, 'hold' if cue == 'hold' else 'send'
+    return message, cue if cue in ('hold', 'format') else 'send'
 
 
 def normalize_letter_plus(text):
@@ -168,7 +192,20 @@ def normalize_transcript_for_display(text):
     return text
 
 
-def append_timing(session, recording_seconds, processing_seconds, status):
+def delivery_plan(transcript, allow_hold=False, format_enabled=False):
+    message, cue = split_terminal_cue(
+        normalize_transcript_for_display(transcript), allow_hold=allow_hold)
+    return {'message': message, 'cue': cue,
+            'format_requested': bool(format_enabled or cue == 'format'),
+            'format_error': None}
+
+
+def append_timing(session, recording_seconds, processing_seconds, status,
+                  transcription_seconds=None, azure_seconds=None,
+                  format_seconds=None, format_error=False,
+                  delivery_seconds=None, atspi_seconds=None,
+                  ydotool_seconds=None, paste_seconds=None,
+                  delivery_method=None, delivery_error=False):
     entry = {
         'session': session.path.name,
         'started': session.started,
@@ -176,6 +213,22 @@ def append_timing(session, recording_seconds, processing_seconds, status):
         'recording_seconds': round(recording_seconds, 3),
         'processing_seconds': (round(processing_seconds, 3)
                                if processing_seconds is not None else None),
+        'transcription_seconds': (round(transcription_seconds, 3)
+                                  if transcription_seconds is not None else None),
+        'azure_seconds': (round(azure_seconds, 3) if azure_seconds is not None else None),
+        'format_seconds': (round(format_seconds, 3)
+                           if format_seconds is not None else None),
+        'format_requested': session.format_requested,
+        'format_error': format_error,
+        'delivery_seconds': (round(delivery_seconds, 3)
+                             if delivery_seconds is not None else None),
+        'atspi_seconds': (round(atspi_seconds, 3) if atspi_seconds is not None else None),
+        'ydotool_seconds': (round(ydotool_seconds, 3)
+                            if ydotool_seconds is not None else None),
+        'paste_seconds': (round(paste_seconds, 3)
+                          if paste_seconds is not None else None),
+        'delivery_method': delivery_method,
+        'delivery_error': delivery_error,
     }
     descriptor = os.open(TIMINGS, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
     with os.fdopen(descriptor, 'a', encoding='utf-8') as log:
@@ -206,8 +259,11 @@ def history_page(page, root=HISTORY, timings_path=TIMINGS):
     items = []
     for path in sessions[page * HISTORY_PAGE_SIZE:(page + 1) * HISTORY_PAGE_SIZE]:
         try:
+            displayed = path / 'formatted.txt'
+            if not displayed.is_file():
+                displayed = path / 'transcript.txt'
             transcript = normalize_transcript_for_display(
-                (path / 'transcript.txt').read_text(encoding='utf-8').rstrip('\n'))
+                displayed.read_text(encoding='utf-8').rstrip('\n'))
             metadata = json.loads((path / 'metadata.json').read_text(encoding='utf-8'))
         except (OSError, ValueError):
             continue
@@ -226,7 +282,10 @@ def history_page(page, root=HISTORY, timings_path=TIMINGS):
             stamp = dt.datetime.fromtimestamp(path.stat().st_mtime).astimezone()
         items.append({'transcript': transcript, 'started': stamp,
                       'recording_seconds': recording,
-                      'processing_seconds': timing.get('processing_seconds')})
+                      'processing_seconds': timing.get('processing_seconds'),
+                      'transcription_seconds': timing.get('transcription_seconds'),
+                      'delivery_seconds': timing.get('delivery_seconds'),
+                      'delivery_method': timing.get('delivery_method')})
     return items, page, total_pages
 
 
@@ -243,6 +302,8 @@ class Session:
         self.audio.setsampwidth(2)
         self.audio.setframerate(24000)
         self.final_text = ''
+        self.format_requested = False
+        self.allow_hold = False
         self.audio_closed = False
         self.status = 'recording'
         self.write_metadata()
@@ -251,7 +312,8 @@ class Session:
         atomic_text(self.path / 'metadata.json', json.dumps({
             'started': self.started, 'ended': getattr(self, 'ended', None),
             'model': DEPLOYMENT, 'endpoint': AZURE_ENDPOINT, 'status': self.status,
-            'initial_mode': self.mode}, indent=2) + '\n')
+            'initial_mode': self.mode, 'format_requested': self.format_requested},
+                    indent=2) + '\n')
 
     def event(self, kind, **fields):
         self.events.write(json.dumps({'time': dt.datetime.now().astimezone().isoformat(),
@@ -261,6 +323,10 @@ class Session:
         self.final_text = text
         self.event('final', text=text)
         self.save_transcript()
+
+    def set_formatted_text(self, text):
+        atomic_text(self.path / 'formatted.txt', text + '\n')
+        self.event('formatted', chars=len(text))
 
     def transcript(self):
         return self.final_text
@@ -290,13 +356,21 @@ class Dictation:
         os.chmod(HISTORY, 0o700)
         TIMINGS.touch(mode=0o600, exist_ok=True)
         os.chmod(TIMINGS, 0o600)
-        self.prefs = {'mode': 'cursor', 'press_enter': False, 'pause_music': False}
+        self.prefs = {'mode': 'cursor', 'press_enter': False, 'pause_music': False,
+                      'format': False,
+                      'caret_insertion': 'paste'}
         if SETTINGS.exists():
             try:
                 self.prefs.update(json.loads(SETTINGS.read_text()))
             except (ValueError, OSError):
                 pass
         self.mode = self.prefs.get('mode', 'cursor')
+        self.caret_insertion = self.prefs.get('caret_insertion', 'paste')
+        if self.caret_insertion not in ('paste', 'type'):
+            self.caret_insertion = 'paste'
+        self.clipboard = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
+        self.clipboard_snapshot = None
+        self.paste_transaction = None
         self.session = None
         self.stop_event = None
         self.cancel_event = None
@@ -320,6 +394,9 @@ class Dictation:
         self.record_seconds = 0.0
         self.processing_started = None
         self.processing_seconds = None
+        self.transcription_seconds = None
+        self.delivery_started = None
+        self.delivery_seconds = None
         self.paused_players = {}
         self.history_page_number = 0
         self._install_css()
@@ -415,6 +492,15 @@ class Dictation:
         (self.cursor_button if self.mode == 'cursor' else self.buffer_button).set_active(True)
         self.cursor_button.connect('toggled', self._mode_changed)
         self.buffer_button.connect('toggled', self._mode_changed)
+        self.format_button = Gtk.ToggleButton(label='✦')
+        self.format_button.set_relief(Gtk.ReliefStyle.NONE)
+        self.format_button.set_can_focus(False)
+        self.format_button.set_size_request(24, 24)
+        self.format_button.set_active(self.prefs.get('format') is True)
+        self.format_button.set_tooltip_text('Format dictated text with AI · never press Enter')
+        self.format_button.get_style_context().add_class('ld-format-toggle')
+        self.format_button.connect('toggled', self._format_changed)
+        header_row.pack_start(self.format_button, False, False, 0)
         self.enter_button = Gtk.ToggleButton(label='↵')
         self.enter_button.set_relief(Gtk.ReliefStyle.NONE)
         self.enter_button.set_can_focus(False)
@@ -456,7 +542,8 @@ class Dictation:
         dictation_view.pack_start(live_row, False, False, 0)
         self.timing = Gtk.Label(label='0:00')
         self.timing.set_xalign(0)
-        self.timing.set_width_chars(13)
+        self.timing.set_width_chars(20)
+        self.timing.set_tooltip_text('Recording · transcription · delivery')
         self.timing.get_style_context().add_class('ld-timing')
         live_row.pack_start(self.timing, False, False, 0)
         live_row.pack_start(self.live, True, True, 0)
@@ -616,8 +703,13 @@ class Dictation:
         date_label.set_xalign(0)
         date_label.get_style_context().add_class('ld-history-date')
         heading.pack_start(date_label, True, True, 0)
-        durations = (f"Recording {self._history_duration(item['recording_seconds'])}"
-                     f"  ·  Processing {self._history_duration(item['processing_seconds'])}")
+        if item['transcription_seconds'] is not None:
+            durations = (f"Recording {self._history_duration(item['recording_seconds'])}"
+                         f"  ·  Transcribe {self._history_duration(item['transcription_seconds'])}"
+                         f"  ·  Write {self._history_duration(item['delivery_seconds'])}")
+        else:
+            durations = (f"Recording {self._history_duration(item['recording_seconds'])}"
+                         f"  ·  Processing {self._history_duration(item['processing_seconds'])}")
         duration_label = Gtk.Label(label=durations)
         duration_label.get_style_context().add_class('ld-history-duration')
         heading.pack_end(duration_label, False, False, 0)
@@ -823,7 +915,7 @@ class Dictation:
     def _set_wave_level(self, session, level, rms):
         if self.session is session and self.wave_active:
             self.wave_level = level
-            if rms >= 400:
+            if rms >= 270:
                 self.voice_frames += 1
             elif self.voice_frames < 3:
                 self.voice_frames = 0
@@ -873,7 +965,7 @@ class Dictation:
             return False
         self.wave_phase += 0.13 if self.wave_processing else 0.21
         if self.wave_active:
-            self.wave_display += (max(0.26, self.wave_level) - self.wave_display) * 0.32
+            self.wave_display += (max(0.18, self.wave_level) - self.wave_display) * 0.32
         self.waveform.queue_draw()
         return True
 
@@ -888,9 +980,18 @@ class Dictation:
                      else self.record_seconds)
         display = self._clock(recording)
         if self.processing_started is not None:
-            processing = (time.monotonic() - self.processing_started
-                          if self.processing_seconds is None else self.processing_seconds)
-            display += ' · ' + self._clock(processing)
+            if self.transcription_seconds is None:
+                processing = (time.monotonic() - self.processing_started
+                              if self.processing_seconds is None else self.processing_seconds)
+                display += ' · ' + self._clock(processing)
+            elif self.delivery_started is None:
+                display += ' · ' + self._clock(self.transcription_seconds)
+            else:
+                delivery = (time.monotonic() - self.delivery_started
+                            if self.delivery_seconds is None
+                            else self.delivery_seconds or 0)
+                display += (' · ' + self._clock(self.transcription_seconds) +
+                            ' · ' + self._clock(delivery))
         self.timing.set_text(display)
         return True
 
@@ -943,9 +1044,15 @@ class Dictation:
                     self.buffer_button.set_active(True)
                 elif command == 'cursor':
                     self.cursor_button.set_active(True)
+                elif command in ('paste', 'type'):
+                    self.caret_insertion = command
+                    self.prefs['caret_insertion'] = command
+                    self._save_prefs()
+                    self.status.set_text(f'Caret insertion: {command}')
                 elif command == 'status':
                     gdk_window = self.window.get_window()
                     connection.sendall(json.dumps({'mode': self.mode,
+                        'caret_insertion': self.caret_insertion,
                         'recording': self.stop_event is not None and not self.stop_event.is_set(),
                         'finalizing': self.stop_event is not None and self.stop_event.is_set(),
                         'microphone_running': self.audio_proc is not None and self.audio_proc.returncode is None,
@@ -1000,6 +1107,10 @@ class Dictation:
 
     def _enter_changed(self, button):
         self.prefs['press_enter'] = button.get_active()
+        self._save_prefs()
+
+    def _format_changed(self, button):
+        self.prefs['format'] = button.get_active()
         self._save_prefs()
 
     def _music_changed(self, button):
@@ -1164,28 +1275,176 @@ class Dictation:
                 return False
         return not self.window.has_toplevel_focus()
 
+    def _save_clipboard_for_paste(self, session):
+        snapshot = {'session': session, 'ready': False, 'text': None}
+        self.clipboard_snapshot = snapshot
+        self.clipboard.request_text(self._clipboard_snapshot_received, snapshot)
+
+    def _clipboard_snapshot_received(self, _clipboard, text, snapshot):
+        if self.clipboard_snapshot is snapshot and self.session is snapshot['session']:
+            snapshot['text'] = text
+            snapshot['ready'] = True
+
+    def _paste_target(self, session, value, done):
+        snapshot = self.clipboard_snapshot
+        saved_text = (snapshot['text'] if snapshot is not None and
+                      snapshot['session'] is session and snapshot['ready'] else None)
+        transaction = {'session': session, 'value': value, 'saved_text': saved_text,
+                       'done': done, 'started': time.monotonic(),
+                       'paste_seconds': None, 'sent': False, 'restore_timeout': None,
+                       'command_timeout': None, 'process': None, 'timed_out': False,
+                       'attempted': False}
+        self.paste_transaction = transaction
+        try:
+            self.clipboard.set_text(value, -1)
+        except Exception as error:
+            print(f'Could not set clipboard for paste: {error}', file=sys.stderr)
+            self._request_paste_restore(transaction)
+            return
+        threading.Thread(target=self._verify_paste_clipboard, args=(transaction,),
+                         daemon=True).start()
+
+    def _verify_paste_clipboard(self, transaction):
+        # GTK owns the XWayland clipboard. Wait until the Wayland clipboard seen by
+        # native target apps actually contains this transcript before sending Ctrl+V.
+        if shutil.which('wl-paste') is None:
+            GLib.idle_add(self._paste_clipboard_verified, transaction, False)
+            return
+        deadline = time.monotonic() + PASTE_VERIFY_TIMEOUT_SECONDS
+        while time.monotonic() < deadline:
+            try:
+                result = subprocess.run(['wl-paste', '--no-newline'], capture_output=True,
+                                        timeout=0.5)
+                if result.returncode == 0 and result.stdout.decode('utf-8') == transaction['value']:
+                    GLib.idle_add(self._paste_clipboard_verified, transaction, True)
+                    return
+            except (OSError, subprocess.SubprocessError, UnicodeError):
+                pass
+            time.sleep(0.05)
+        GLib.idle_add(self._paste_clipboard_verified, transaction, False)
+
+    def _paste_clipboard_verified(self, transaction, ready):
+        if self.paste_transaction is not transaction:
+            return False
+        if not ready:
+            self._request_paste_restore(transaction)
+            return False
+        try:
+            command = ['sudo', '-n', 'ydotool', 'key', *PASTE_KEYS[PASTE_SHORTCUT]]
+            process = Gio.Subprocess.new(
+                command, Gio.SubprocessFlags.STDOUT_SILENCE | Gio.SubprocessFlags.STDERR_SILENCE)
+            transaction['process'] = process
+            transaction['attempted'] = True
+            process.wait_async(None, self._paste_process_done, transaction)
+            transaction['command_timeout'] = GLib.timeout_add(
+                6000, self._paste_command_timeout, transaction)
+        except (GLib.Error, OSError) as error:
+            print(f'Could not start paste shortcut: {error}', file=sys.stderr)
+            if transaction['process'] is not None:
+                transaction['sent'] = None
+            self._request_paste_restore(transaction)
+        return False
+
+    def _paste_process_done(self, process, result, transaction):
+        try:
+            sent = bool(process.wait_finish(result) and process.get_successful())
+        except GLib.Error:
+            sent = False
+        if self.paste_transaction is not transaction or transaction['timed_out']:
+            return
+        if transaction['command_timeout'] is not None:
+            GLib.source_remove(transaction['command_timeout'])
+            transaction['command_timeout'] = None
+        transaction['sent'] = sent
+        transaction['paste_seconds'] = time.monotonic() - transaction['started']
+        delay = PASTE_RESTORE_DELAY_MS if transaction['sent'] else 0
+        GLib.timeout_add(delay, self._request_paste_restore, transaction)
+
+    def _paste_command_timeout(self, transaction):
+        if self.paste_transaction is transaction:
+            transaction['command_timeout'] = None
+            transaction['timed_out'] = True
+            transaction['sent'] = None  # A partial paste may have occurred; do not type again.
+            transaction['paste_seconds'] = time.monotonic() - transaction['started']
+            transaction['process'].force_exit()
+            self._request_paste_restore(transaction)
+        return False
+
+    def _request_paste_restore(self, transaction):
+        if self.paste_transaction is not transaction:
+            return False
+        transaction['restore_timeout'] = GLib.timeout_add(
+            2000, self._paste_restore_timeout, transaction)
+        try:
+            self.clipboard.request_text(self._paste_restore_received, transaction)
+        except Exception as error:
+            print(f'Could not inspect clipboard after paste: {error}', file=sys.stderr)
+            self._finish_paste(transaction)
+        return False
+
+    def _paste_restore_received(self, clipboard, current_text, transaction):
+        if self.paste_transaction is not transaction:
+            return
+        try:
+            if current_text == transaction['value']:
+                if transaction['saved_text'] is not None:
+                    clipboard.set_text(transaction['saved_text'], -1)
+                else:
+                    clipboard.clear()
+        except Exception as error:
+            print(f'Could not restore clipboard after paste: {error}', file=sys.stderr)
+        finally:
+            self._finish_paste(transaction)
+
+    def _paste_restore_timeout(self, transaction):
+        if self.paste_transaction is transaction:
+            transaction['restore_timeout'] = None
+            self._finish_paste(transaction)
+        return False
+
+    def _finish_paste(self, transaction):
+        if self.paste_transaction is not transaction:
+            return
+        if transaction['restore_timeout'] is not None:
+            GLib.source_remove(transaction['restore_timeout'])
+        if transaction['command_timeout'] is not None:
+            GLib.source_remove(transaction['command_timeout'])
+        self.paste_transaction = None
+        self.clipboard_snapshot = None
+        transaction['done'](transaction['sent'], transaction['paste_seconds'],
+                            transaction['attempted'])
+
     def _type_target(self, value):
         target = self.target_accessible
+        atspi_seconds = None
         if target is not None:
+            started = time.monotonic()
+            inserted = False
             try:
                 focused = target.get_state_set().contains(Atspi.StateType.FOCUSED)
                 editable = target.get_editable_text_iface() is not None
                 caret = target.get_caret_offset() if editable else -1
                 if focused and editable and caret >= 0:
-                    if target.insert_text(caret, value, len(value.encode('utf-8'))):
-                        return True
+                    inserted = bool(target.insert_text(caret, value, len(value.encode('utf-8'))))
             except Exception:
                 pass
+            atspi_seconds = time.monotonic() - started
+            if inserted:
+                return True, 'atspi', atspi_seconds, None
         mapped = value.translate(KEYMAP)
         if not mapped.isascii():
-            return False
+            return False, None, atspi_seconds, None
+        started = time.monotonic()
+        typed = False
         try:
             subprocess.run(['sudo', '-n', 'ydotool', 'type', '--key-delay', '1', '--file', '-'],
                            input=mapped, text=True, timeout=max(4, len(mapped) / 30), check=True,
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            return True
+            typed = True
         except (OSError, subprocess.SubprocessError):
-            return False
+            pass
+        ydotool_seconds = time.monotonic() - started
+        return typed, 'ydotool' if typed else None, atspi_seconds, ydotool_seconds
 
     def _press_enter(self):
         if not self._target_focused():
@@ -1203,6 +1462,10 @@ class Dictation:
         if self.stop_event is not None:
             if self.stop_event.is_set():
                 return
+            self.session.format_requested = self.format_button.get_active()
+            self.session.allow_hold = self.mode == 'cursor' and self.enter_button.get_active()
+            if self.caret_insertion == 'paste':
+                self._save_clipboard_for_paste(self.session)
             self._dismiss_mic_warning()
             self.record_seconds = time.monotonic() - self.record_started
             self.processing_started = time.monotonic()
@@ -1238,6 +1501,10 @@ class Dictation:
             self.record_seconds = 0.0
             self.processing_started = None
             self.processing_seconds = None
+            self.transcription_seconds = None
+            self.delivery_started = None
+            self.delivery_seconds = None
+            self.clipboard_snapshot = None
             self._update_timing()
             if self.timing_timer is not None:
                 GLib.source_remove(self.timing_timer)
@@ -1300,6 +1567,13 @@ class Dictation:
 
     def _run_thread(self, key, session, stop, cancel):
         result = 'complete'
+        transcript = None
+        error_message = None
+        transcription_started = None
+        transcription_seconds = None
+        azure_seconds = None
+        plan = None
+        format_seconds = None
         try:
             try:
                 asyncio.run(self._capture(session, stop))
@@ -1310,28 +1584,104 @@ class Dictation:
                 result = 'cancelled'
                 session.event('cancelled')
             else:
-                transcript = self._transcribe_file(key, session)
+                transcription_started = time.monotonic()
+                transcript, azure_seconds = self._transcribe_file(key, session)
+                transcription_seconds = time.monotonic() - transcription_started
                 session.set_transcript(transcript)
-                GLib.idle_add(self._text_event, session, transcript)
+                plan = delivery_plan(transcript, session.allow_hold, session.format_requested)
+                session.format_requested = plan['format_requested']
+                if session.format_requested and plan['message']:
+                    format_started = time.monotonic()
+                    try:
+                        formatted = self._format_text(key, plan['message'])
+                        session.set_formatted_text(formatted)
+                        plan['message'] = formatted
+                    except Exception as error:
+                        plan['format_error'] = str(error)
+                        session.event('format_error', message=str(error))
+                    finally:
+                        format_seconds = time.monotonic() - format_started
         except Exception as error:
             if cancel.is_set():
                 result = 'cancelled'
                 session.event('cancelled')
             else:
                 result = 'failed'
-                session.event('error', message=str(error))
-                GLib.idle_add(self.status.set_text, f'Error: {error}')
+                error_message = str(error)
+                session.event('error', message=error_message)
         finally:
+            if transcription_started is not None and transcription_seconds is None:
+                transcription_seconds = time.monotonic() - transcription_started
             recording_seconds = (self.record_seconds if stop.is_set() else
                                  time.monotonic() - self.record_started)
-            processing_seconds = (time.monotonic() - self.processing_started
-                                  if self.processing_started is not None else None)
+            GLib.idle_add(self._delivery_ready, session, result, recording_seconds,
+                          transcription_seconds, azure_seconds, plan, format_seconds,
+                          error_message)
+
+    def _delivery_ready(self, session, result, recording_seconds, transcription_seconds,
+                        azure_seconds, plan, format_seconds, error_message):
+        if self.session is not session:
+            return False
+        self.transcription_seconds = transcription_seconds
+        if result == 'complete':
+            self.delivery_started = time.monotonic()
+        self._update_timing()
+        # Let GTK paint the completed transcription time before a slow target insertion.
+        GLib.timeout_add(40, self._finish_delivery, session, result, recording_seconds,
+                         transcription_seconds, azure_seconds, plan, format_seconds,
+                         error_message)
+        return False
+
+    def _finish_delivery(self, session, result, recording_seconds, transcription_seconds,
+                         azure_seconds, plan, format_seconds, error_message):
+        if self.session is not session:
+            return False
+        complete = lambda metrics: self._delivery_completed(
+            session, result, recording_seconds, transcription_seconds,
+            azure_seconds, format_seconds, plan, metrics)
+        try:
+            if result == 'complete':
+                self._text_event(session, plan, complete)
+                return False
+            if error_message is not None:
+                self.status.set_text(f'Error: {error_message}')
+        except Exception as error:
+            self.delivery_error = True
+            self.status.set_text(f'Could not deliver transcript: {error}')
+        complete({'delivery_method': None, 'atspi_seconds': None,
+                  'ydotool_seconds': None, 'paste_seconds': None})
+        return False
+
+    def _delivery_completed(self, session, result, recording_seconds,
+                            transcription_seconds, azure_seconds, format_seconds,
+                            plan, metrics):
+        if self.session is not session:
+            return
+        self.clipboard_snapshot = None
+        if self.delivery_started is not None:
+            self.delivery_seconds = time.monotonic() - self.delivery_started
+        try:
             session.finish(result)
-            try:
-                append_timing(session, recording_seconds, processing_seconds, result)
-            except OSError as error:
-                print(f'Could not save dictation timing: {error}', file=sys.stderr)
-            GLib.idle_add(self._finished, result, recording_seconds, processing_seconds)
+        except Exception as error:
+            self.delivery_error = True
+            self.status.set_text(f'Could not save session: {error}')
+        processing_seconds = (time.monotonic() - self.processing_started
+                              if self.processing_started is not None else None)
+        self._finished(result, recording_seconds, processing_seconds)
+        try:
+            append_timing(session, recording_seconds, processing_seconds, result,
+                          transcription_seconds=transcription_seconds,
+                          azure_seconds=azure_seconds,
+                          format_seconds=format_seconds,
+                          format_error=bool(plan and plan['format_error']),
+                          delivery_seconds=self.delivery_seconds,
+                          atspi_seconds=metrics['atspi_seconds'],
+                          ydotool_seconds=metrics['ydotool_seconds'],
+                          paste_seconds=metrics['paste_seconds'],
+                          delivery_method=metrics['delivery_method'],
+                          delivery_error=self.delivery_error)
+        except OSError as error:
+            print(f'Could not save dictation timing: {error}', file=sys.stderr)
 
     def _restore_after_show(self):
         if not self._restore_target() and self.window.has_toplevel_focus():
@@ -1356,7 +1706,7 @@ class Dictation:
                     raise RuntimeError('Microphone capture stopped')
                 meter_bytes = chunk[:len(chunk) & ~1]
                 rms = audioop.rms(meter_bytes, 2) if meter_bytes else 0
-                level = min(1.0, max(0.0, (rms - 160) / 3500))
+                level = min(1.0, max(0.0, (rms - 75) / 550))
                 GLib.idle_add(self._set_wave_level, session, level, rms)
                 session.audio.writeframesraw(chunk)
         finally:
@@ -1401,6 +1751,7 @@ class Dictation:
                    f'/audio/transcriptions?{version}')
             request = urllib.request.Request(url, data=body, method='POST', headers={
                 'api-key': key, 'Content-Type': f'multipart/form-data; boundary={boundary}'})
+            azure_started = time.monotonic()
             try:
                 with urllib.request.urlopen(request, timeout=300) as response:
                     payload = json.load(response)
@@ -1415,45 +1766,148 @@ class Dictation:
             transcript = payload.get('text')
             if not isinstance(transcript, str):
                 raise RuntimeError('Azure transcription returned no text field')
-            return transcript.strip()
+            return transcript.strip(), time.monotonic() - azure_started
 
-    def _text_event(self, session, transcript):
+    @staticmethod
+    def _format_text(key, text):
+        if not FORMAT_DEPLOYMENT:
+            raise RuntimeError('Set format_deployment in the user config')
+        version = urllib.parse.urlencode({'api-version': FORMAT_API_VERSION})
+        url = (f'{AZURE_ENDPOINT}/openai/deployments/'
+               f'{urllib.parse.quote(FORMAT_DEPLOYMENT, safe="")}/chat/completions?{version}')
+        body = json.dumps({'messages': [
+            {'role': 'system', 'content': FORMAT_PROMPT},
+            {'role': 'user', 'content': text},
+        ], 'temperature': 0.2}, ensure_ascii=False).encode('utf-8')
+        request = urllib.request.Request(url, data=body, method='POST', headers={
+            'api-key': key, 'Content-Type': 'application/json'})
+        try:
+            with urllib.request.urlopen(request, timeout=180) as response:
+                payload = json.load(response)
+        except urllib.error.HTTPError as error:
+            try:
+                detail = json.loads(error.read(2048)).get('error', {}).get('message', '')
+            except (ValueError, AttributeError):
+                detail = ''
+            raise RuntimeError(
+                f'Azure formatting failed ({error.code}): {detail or error.reason}') from error
+        except urllib.error.URLError as error:
+            raise RuntimeError(f'Azure formatting connection failed: {error.reason}') from error
+        choices = payload.get('choices')
+        if not isinstance(choices, list) or not choices:
+            raise RuntimeError('Azure formatting returned no choice')
+        choice = choices[0]
+        if choice.get('finish_reason') != 'stop':
+            raise RuntimeError('Azure formatting did not finish cleanly')
+        content = choice.get('message', {}).get('content')
+        if not isinstance(content, str) or not content.strip():
+            raise RuntimeError('Azure formatting returned no text')
+        return content.strip()
+
+    def _text_event(self, session, plan, done):
+        metrics = {'delivery_method': None, 'atspi_seconds': None,
+                   'ydotool_seconds': None, 'paste_seconds': None}
         if self.session is not session:
-            return False
-        transcript = normalize_transcript_for_display(transcript)
-        if not transcript:
-            self.live.set_text('')
-            self.status.set_text('No speech recognized · audio saved in History')
-            self.delivery_error = True
-            return False
-        message, cue = split_terminal_cue(
-            transcript, allow_hold=self.mode == 'cursor' and self.enter_button.get_active())
-        self.live.set_text(message[-300:])
+            return
+        message = plan['message']
+        cue = plan['cue']
         if cue == 'hold' and not message:
-            return False
+            done(metrics)
+            return
+        if not message:
+            self.live.set_text('')
+            self.status.set_text('No text to insert · audio saved in History')
+            self.delivery_error = True
+            done(metrics)
+            return
+        self.live.set_text(message[-300:])
+        if plan['format_error']:
+            self.delivery_error = True
+            self.status.set_text('Formatting failed · using original text')
+        send_after = (not plan['format_requested'] and
+                      (cue == 'send' or
+                       (self.enter_button.get_active() and cue not in ('hold', 'format'))))
         if self.mode == 'buffer':
             buffer = self.text.get_buffer()
             buffer.insert(buffer.get_end_iter(), message)
+            metrics['delivery_method'] = 'buffer'
         else:
             if not self._target_focused():
                 self.delivery_error = True
                 buffer = self.text.get_buffer()
                 buffer.insert(buffer.get_end_iter(), message)
+                metrics['delivery_method'] = 'buffer'
                 self.buffer_button.set_active(True)
                 self.status.set_text('Caret focus changed · transcript kept in Buffer')
-                return False
-            if not self._type_target(message):
+                done(metrics)
+                return
+            if self.caret_insertion == 'paste':
+                self._paste_target(
+                    session, message,
+                    lambda sent, seconds, attempted: self._paste_completed(
+                        session, message, send_after, metrics, done,
+                        sent, seconds, attempted))
+                return
+            typed, method, atspi_seconds, ydotool_seconds = self._type_target(message)
+            metrics['atspi_seconds'] = atspi_seconds
+            metrics['ydotool_seconds'] = ydotool_seconds
+            if not typed:
                 self.delivery_error = True
                 buffer = self.text.get_buffer()
                 buffer.insert(buffer.get_end_iter(), message)
+                metrics['delivery_method'] = 'buffer'
                 self.buffer_button.set_active(True)
                 self.status.set_text('Could not type at caret · transcript kept in Buffer')
-            elif ((cue == 'send' or
-                   (self.enter_button.get_active() and cue != 'hold')) and
-                  not self._press_enter()):
+            else:
+                metrics['delivery_method'] = method
+            if typed and send_after and not self._press_enter():
                 self.delivery_error = True
                 self.status.set_text('Text inserted · Enter could not be pressed')
-        return False
+        done(metrics)
+
+    def _paste_completed(self, session, message, send_after, metrics, done,
+                         sent, seconds, attempted):
+        if self.session is not session:
+            return
+        metrics['paste_seconds'] = seconds
+        try:
+            if sent is True:
+                metrics['delivery_method'] = 'paste'
+                if send_after and not self._press_enter():
+                    self.delivery_error = True
+                    self.status.set_text('Text pasted · Enter could not be pressed')
+            elif sent is None:
+                self.delivery_error = True
+                metrics['delivery_method'] = 'paste-uncertain'
+                self.status.set_text('Paste result uncertain · transcript saved in History')
+            elif not attempted:
+                typed, method, atspi_seconds, ydotool_seconds = self._type_target(message)
+                metrics['atspi_seconds'] = atspi_seconds
+                metrics['ydotool_seconds'] = ydotool_seconds
+                if typed:
+                    metrics['delivery_method'] = method
+                    if send_after and not self._press_enter():
+                        self.delivery_error = True
+                        self.status.set_text('Text inserted · Enter could not be pressed')
+                else:
+                    self.delivery_error = True
+                    buffer = self.text.get_buffer()
+                    buffer.insert(buffer.get_end_iter(), message)
+                    metrics['delivery_method'] = 'buffer'
+                    self.buffer_button.set_active(True)
+                    self.status.set_text('Clipboard was not ready · transcript kept in Buffer')
+            else:
+                self.delivery_error = True
+                buffer = self.text.get_buffer()
+                buffer.insert(buffer.get_end_iter(), message)
+                metrics['delivery_method'] = 'buffer'
+                self.buffer_button.set_active(True)
+                self.status.set_text('Paste shortcut failed · transcript kept in Buffer')
+        except Exception as error:
+            self.delivery_error = True
+            self.status.set_text(f'Could not finish paste: {error}')
+        finally:
+            done(metrics)
 
     def _finished(self, result, recording_seconds, processing_seconds):
         self._dismiss_mic_warning()
@@ -1462,6 +1916,7 @@ class Dictation:
             GLib.source_remove(self.timing_timer)
             self.timing_timer = None
         self.record_seconds = recording_seconds
+        self.record_started = None
         self.processing_seconds = processing_seconds
         self._update_timing()
         self.stop_event = None

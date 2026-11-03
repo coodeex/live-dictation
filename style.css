@@ -99,6 +99,7 @@ window.ld-opaque { background: #10251f; }
     border-color: rgba(255,255,255,0.20);
 }
 
+.ld-format-toggle,
 .ld-enter-toggle,
 .ld-music-toggle {
     background-image: none;
@@ -114,14 +115,17 @@ window.ld-opaque { background: #10251f; }
     font-size: 17px;
     font-weight: 600;
 }
+.ld-format-toggle:hover,
 .ld-enter-toggle:hover,
 .ld-music-toggle:hover { background-color: rgba(209,250,229,0.14); }
+.ld-format-toggle:checked,
 .ld-enter-toggle:checked,
 .ld-music-toggle:checked {
     background-image: linear-gradient(180deg, @ld_accent, @ld_accent2);
     color: @ld_on_accent;
     border-color: rgba(255,255,255,0.20);
 }
+.ld-format-toggle:disabled,
 .ld-enter-toggle:disabled,
 .ld-music-toggle:disabled { opacity: 0.48; }
 

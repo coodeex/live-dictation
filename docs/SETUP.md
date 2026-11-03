@@ -7,7 +7,7 @@ Live Dictation currently targets a GNOME desktop on Linux. The popup uses GTK 3 
 On Ubuntu, install the GTK introspection bindings and audio tools:
 
 ```bash
-sudo apt install python3-gi gir1.2-gtk-3.0 gir1.2-atspi-2.0 pulseaudio-utils xdg-utils libglib2.0-bin ffmpeg
+sudo apt install python3-gi gir1.2-gtk-3.0 gir1.2-atspi-2.0 pulseaudio-utils xdg-utils libglib2.0-bin ffmpeg wl-clipboard
 git clone https://github.com/coodeex/live-dictation.git
 cd live-dictation
 ```
@@ -28,16 +28,16 @@ chmod 600 ~/.config/live-dictation/config.json
 ${EDITOR:-nano} ~/.config/live-dictation/config.json
 ```
 
-Set `azure_endpoint` to your Azure OpenAI resource URL and `deployment` to your `gpt-transcribe` deployment name. The example points `api_key_file` at `~/.config/live-dictation/azure.env`. Create that file with user-only permissions and add one line, `AZURE_OPENAI_API_KEY=...`:
+Set `azure_endpoint` to your Azure OpenAI resource URL and `deployment` to your `gpt-transcribe` deployment name. To use the optional **✦ Format** mode, set `format_deployment` to a chat-completions deployment in the same Azure resource. The example points `api_key_file` at `~/.config/live-dictation/azure.env`. Create that file with user-only permissions and add one line, `AZURE_OPENAI_API_KEY=...`:
 
 ```bash
 install -m 600 /dev/null ~/.config/live-dictation/azure.env
 ${EDITOR:-nano} ~/.config/live-dictation/azure.env
 ```
 
-Do not put the key in `config.example.json` or any file inside the clone. You can instead provide `AZURE_OPENAI_API_KEY` through the environment. Environment variables `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_DEPLOYMENT`, `AZURE_OPENAI_API_VERSION`, `AZURE_OPENAI_KEY_FILE`, and `LIVE_DICTATION_CONFIG` override their corresponding config values.
+Do not put the key in `config.example.json` or any file inside the clone. You can instead provide `AZURE_OPENAI_API_KEY` through the environment. Environment variables `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_DEPLOYMENT`, `AZURE_OPENAI_API_VERSION`, `AZURE_OPENAI_FORMAT_DEPLOYMENT`, `AZURE_OPENAI_FORMAT_API_VERSION`, `AZURE_OPENAI_KEY_FILE`, and `LIVE_DICTATION_CONFIG` override their corresponding config values.
 
-`ydotool_keymap` is optional. Leave it empty for an ordinary US key layout; add character-to-key mappings if your layout needs them for the fallback typing method. The app prefers AT-SPI insertion and only uses this mapping when it falls back to `ydotool`. On a Finnish layout, `"-": "/"` maps a dictated hyphen to the physical key that produces a hyphen; without it, the fallback can type `+` instead.
+Caret mode pastes completed text by default. `paste_shortcut` is `ctrl+v`; set it to `ctrl+shift+v` for a target that uses the terminal-style paste shortcut. The `ydotool_keymap` is only used by the original typing method. Leave it empty for an ordinary US key layout; on a Finnish layout, `"-": "/"` maps a dictated hyphen to the physical key that produces a hyphen during fallback typing.
 
 ## 3. Try it in a terminal
 
@@ -89,7 +89,9 @@ cp extension/extension.js extension/metadata.json ~/.local/share/gnome-shell/ext
 
 Log out and back in, then run `gnome-extensions enable live-dictation@coodeex`. Other GNOME versions may require adapting the extension metadata or API. Without the extension, the app uses AT-SPI focus restoration where possible.
 
-For text fields without an AT-SPI editable interface, Caret mode falls back to `sudo -n ydotool type`. The optional **↵** toggle also uses `sudo -n ydotool key enter` to press Enter after insertion. These paths need `ydotool` and narrowly scoped, passwordless local permission for those commands. Buffer mode does not need them. Configure input injection according to your distribution's security model.
+Caret mode sends a paste shortcut through `sudo -n ydotool key` after placing the transcript on the clipboard. The optional **↵** toggle also uses `sudo -n ydotool key enter`. The original AT-SPI/`ydotool type` method remains available with `python3 client.py type`; switch back to paste with `python3 client.py paste`. The choice persists across restarts. These paths need `ydotool` and narrowly scoped, passwordless local permission for those commands. Buffer mode does not need them. Configure input injection according to your distribution's security model.
+
+When F4 stops recording, the app saves the current text clipboard in memory. Before sending the paste shortcut, it checks with `wl-paste` that the Wayland clipboard contains the new transcript. If that check fails, it uses the original typing method without attempting paste. After a paste, it restores the old text only if the clipboard still contains the dictation. Other clipboard formats may be lost; a clipboard-history app may record the temporary dictation. A shortcut accepted by the input tool cannot prove that the target app pasted. If the shortcut times out after starting, the app reports an uncertain result and keeps the transcript in History instead of typing a possible duplicate.
 
 ## Useful commands
 
@@ -100,6 +102,8 @@ For text fields without an AT-SPI editable interface, Caret mode falls back to `
 | Inspect state | `python3 client.py status` |
 | Select Buffer | `python3 client.py buffer` |
 | Select Caret | `python3 client.py cursor` |
+| Use fast Caret paste | `python3 client.py paste` |
+| Restore original Caret typing | `python3 client.py type` |
 | Inspect logs | `journalctl --user -u live-dictation.service -n 50 --no-pager` |
 
 The `cursor` command is the internal name for the UI's **Caret** destination. See [How it works](ARCHITECTURE.md) for the recording, transcription, and history paths.
