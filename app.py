@@ -65,6 +65,12 @@ FORMAT_PROMPT = ('Lead with the speaker\'s main point in the first sentence, usi
                  'pronoun I. Make the text clearer and shorter while keeping the speaker\'s '
                  'words and meaning. Do not use em dashes; use commas or periods instead. '
                  'Add no facts or structure. Output only the revised text.')
+GRAMMAR_PROMPT = ('Return the full dictated text with the same words, order, meaning, and detail. '
+                  'Fix grammar, spelling, punctuation, and only obvious wrong-word errors. Add '
+                  'new lines where natural. Capitalize sentence starts, the pronoun I, and '
+                  'people\'s names. Write product and provider names in lowercase, such as '
+                  'postgresql, chatgpt, claude, and google, except when one begins a sentence. '
+                  'Do not summarize, shorten, or rephrase for style. Output only the revised text.')
 PASTE_RESTORE_DELAY_MS = 1200
 PASTE_VERIFY_TIMEOUT_SECONDS = 1.5
 PASTE_KEYS = {
@@ -202,17 +208,21 @@ def normalize_transcript_for_display(text):
     return text
 
 
-def delivery_plan(transcript, allow_hold=False, format_enabled=False):
+def delivery_plan(transcript, allow_hold=False, format_enabled=False,
+                  grammar_enabled=False):
     message, cue = split_terminal_cue(
         normalize_transcript_for_display(transcript), allow_hold=allow_hold)
+    format_requested = bool(format_enabled or cue == 'format')
     return {'message': message, 'cue': cue,
-            'format_requested': bool(format_enabled or cue == 'format'),
-            'format_error': None}
+            'format_requested': format_requested,
+            'grammar_requested': bool(grammar_enabled and not format_requested),
+            'format_error': None, 'grammar_error': None, 'grammar_seconds': None}
 
 
 def append_timing(session, recording_seconds, processing_seconds, status,
                   transcription_seconds=None, azure_seconds=None,
                   format_seconds=None, format_error=False,
+                  grammar_seconds=None, grammar_error=False,
                   delivery_seconds=None, atspi_seconds=None,
                   ydotool_seconds=None, paste_seconds=None,
                   delivery_method=None, delivery_error=False):
@@ -230,6 +240,10 @@ def append_timing(session, recording_seconds, processing_seconds, status,
                            if format_seconds is not None else None),
         'format_requested': session.format_requested,
         'format_error': format_error,
+        'grammar_seconds': (round(grammar_seconds, 3)
+                            if grammar_seconds is not None else None),
+        'grammar_requested': session.grammar_requested,
+        'grammar_error': grammar_error,
         'delivery_seconds': (round(delivery_seconds, 3)
                              if delivery_seconds is not None else None),
         'atspi_seconds': (round(atspi_seconds, 3) if atspi_seconds is not None else None),
@@ -270,6 +284,8 @@ def history_page(page, root=HISTORY, timings_path=TIMINGS):
     for path in sessions[page * HISTORY_PAGE_SIZE:(page + 1) * HISTORY_PAGE_SIZE]:
         try:
             displayed = path / 'formatted.txt'
+            if not displayed.is_file():
+                displayed = path / 'grammar.txt'
             if not displayed.is_file():
                 displayed = path / 'transcript.txt'
             transcript = normalize_transcript_for_display(
@@ -313,6 +329,7 @@ class Session:
         self.audio.setframerate(24000)
         self.final_text = ''
         self.format_requested = False
+        self.grammar_requested = False
         self.allow_hold = False
         self.audio_closed = False
         self.status = 'recording'
@@ -322,7 +339,8 @@ class Session:
         atomic_text(self.path / 'metadata.json', json.dumps({
             'started': self.started, 'ended': getattr(self, 'ended', None),
             'model': DEPLOYMENT, 'endpoint': AZURE_ENDPOINT, 'status': self.status,
-            'initial_mode': self.mode, 'format_requested': self.format_requested},
+            'initial_mode': self.mode, 'format_requested': self.format_requested,
+            'grammar_requested': self.grammar_requested},
                     indent=2) + '\n')
 
     def event(self, kind, **fields):
@@ -337,6 +355,10 @@ class Session:
     def set_formatted_text(self, text):
         atomic_text(self.path / 'formatted.txt', text + '\n')
         self.event('formatted', chars=len(text))
+
+    def set_grammar_text(self, text):
+        atomic_text(self.path / 'grammar.txt', text + '\n')
+        self.event('grammar', chars=len(text))
 
     def transcript(self):
         return self.final_text
@@ -368,7 +390,7 @@ class Dictation:
         os.chmod(TIMINGS, 0o600)
         self.prefs = {'mode': 'buffer' if IS_DEV else 'cursor',
                       'press_enter': False, 'pause_music': False,
-                      'format': False,
+                      'format': False, 'grammar': False,
                       'caret_insertion': 'paste'}
         if SETTINGS.exists():
             try:
@@ -523,6 +545,17 @@ class Dictation:
         self.format_button.get_style_context().add_class('ld-format-toggle')
         self.format_button.connect('toggled', self._format_changed)
         header_row.pack_start(self.format_button, False, False, 0)
+        self.grammar_button = Gtk.ToggleButton(label='Aa')
+        self.grammar_button.set_relief(Gtk.ReliefStyle.NONE)
+        self.grammar_button.set_can_focus(False)
+        self.grammar_button.set_size_request(24, 24)
+        self.grammar_button.set_active(
+            self.prefs.get('grammar') is True and not self.format_button.get_active())
+        self.grammar_button.set_tooltip_text(
+            'Grammar and spelling with AI · keep your wording')
+        self.grammar_button.get_style_context().add_class('ld-grammar-toggle')
+        self.grammar_button.connect('toggled', self._grammar_changed)
+        header_row.pack_start(self.grammar_button, False, False, 0)
         self.enter_button = Gtk.ToggleButton(label='↵')
         self.enter_button.set_relief(Gtk.ReliefStyle.NONE)
         self.enter_button.set_can_focus(False)
@@ -1138,7 +1171,15 @@ class Dictation:
         self._save_prefs()
 
     def _format_changed(self, button):
+        if button.get_active() and self.grammar_button.get_active():
+            self.grammar_button.set_active(False)
         self.prefs['format'] = button.get_active()
+        self._save_prefs()
+
+    def _grammar_changed(self, button):
+        if button.get_active() and self.format_button.get_active():
+            self.format_button.set_active(False)
+        self.prefs['grammar'] = button.get_active()
         self._save_prefs()
 
     def _music_changed(self, button):
@@ -1482,6 +1523,7 @@ class Dictation:
             if self.stop_event.is_set():
                 return
             self.session.format_requested = self.format_button.get_active()
+            self.session.grammar_requested = self.grammar_button.get_active()
             self.session.allow_hold = self.mode == 'cursor' and self.enter_button.get_active()
             if self.caret_insertion == 'paste':
                 self._save_clipboard_for_paste(self.session)
@@ -1607,8 +1649,10 @@ class Dictation:
                 transcript, azure_seconds = self._transcribe_file(key, session)
                 transcription_seconds = time.monotonic() - transcription_started
                 session.set_transcript(transcript)
-                plan = delivery_plan(transcript, session.allow_hold, session.format_requested)
+                plan = delivery_plan(transcript, session.allow_hold,
+                                     session.format_requested, session.grammar_requested)
                 session.format_requested = plan['format_requested']
+                session.grammar_requested = plan['grammar_requested']
                 if session.format_requested and plan['message']:
                     format_started = time.monotonic()
                     try:
@@ -1620,6 +1664,17 @@ class Dictation:
                         session.event('format_error', message=str(error))
                     finally:
                         format_seconds = time.monotonic() - format_started
+                elif session.grammar_requested and plan['message']:
+                    grammar_started = time.monotonic()
+                    try:
+                        corrected = self._grammar_text(key, plan['message'])
+                        session.set_grammar_text(corrected)
+                        plan['message'] = corrected
+                    except Exception as error:
+                        plan['grammar_error'] = str(error)
+                        session.event('grammar_error', message=str(error))
+                    finally:
+                        plan['grammar_seconds'] = time.monotonic() - grammar_started
         except Exception as error:
             if cancel.is_set():
                 result = 'cancelled'
@@ -1693,6 +1748,8 @@ class Dictation:
                           azure_seconds=azure_seconds,
                           format_seconds=format_seconds,
                           format_error=bool(plan and plan['format_error']),
+                          grammar_seconds=(plan['grammar_seconds'] if plan else None),
+                          grammar_error=bool(plan and plan['grammar_error']),
                           delivery_seconds=self.delivery_seconds,
                           atspi_seconds=metrics['atspi_seconds'],
                           ydotool_seconds=metrics['ydotool_seconds'],
@@ -1789,13 +1846,22 @@ class Dictation:
 
     @staticmethod
     def _format_text(key, text):
+        content = Dictation._rewrite_text(key, text, FORMAT_PROMPT, 'formatting')
+        return re.sub(r'[ \t]*—+[ \t]*', ' ', content).strip()
+
+    @staticmethod
+    def _grammar_text(key, text):
+        return Dictation._rewrite_text(key, text, GRAMMAR_PROMPT, 'grammar correction')
+
+    @staticmethod
+    def _rewrite_text(key, text, prompt, operation):
         if not FORMAT_DEPLOYMENT:
             raise RuntimeError('Set format_deployment in the user config')
         version = urllib.parse.urlencode({'api-version': FORMAT_API_VERSION})
         url = (f'{AZURE_ENDPOINT}/openai/deployments/'
                f'{urllib.parse.quote(FORMAT_DEPLOYMENT, safe="")}/chat/completions?{version}')
         body = json.dumps({'messages': [
-            {'role': 'system', 'content': FORMAT_PROMPT},
+            {'role': 'system', 'content': prompt},
             {'role': 'user', 'content': text},
         ], 'temperature': 0.2}, ensure_ascii=False).encode('utf-8')
         request = urllib.request.Request(url, data=body, method='POST', headers={
@@ -1809,19 +1875,19 @@ class Dictation:
             except (ValueError, AttributeError):
                 detail = ''
             raise RuntimeError(
-                f'Azure formatting failed ({error.code}): {detail or error.reason}') from error
+                f'Azure {operation} failed ({error.code}): {detail or error.reason}') from error
         except urllib.error.URLError as error:
-            raise RuntimeError(f'Azure formatting connection failed: {error.reason}') from error
+            raise RuntimeError(f'Azure {operation} connection failed: {error.reason}') from error
         choices = payload.get('choices')
         if not isinstance(choices, list) or not choices:
-            raise RuntimeError('Azure formatting returned no choice')
+            raise RuntimeError(f'Azure {operation} returned no choice')
         choice = choices[0]
         if choice.get('finish_reason') != 'stop':
-            raise RuntimeError('Azure formatting did not finish cleanly')
+            raise RuntimeError(f'Azure {operation} did not finish cleanly')
         content = choice.get('message', {}).get('content')
         if not isinstance(content, str) or not content.strip():
-            raise RuntimeError('Azure formatting returned no text')
-        return re.sub(r'[ \t]*—+[ \t]*', ' ', content).strip()
+            raise RuntimeError(f'Azure {operation} returned no text')
+        return content.strip()
 
     def _text_event(self, session, plan, done):
         metrics = {'delivery_method': None, 'atspi_seconds': None,
@@ -1843,7 +1909,10 @@ class Dictation:
         if plan['format_error']:
             self.delivery_error = True
             self.status.set_text('Formatting failed · using original text')
-        send_after = (not plan['format_requested'] and
+        if plan['grammar_error']:
+            self.delivery_error = True
+            self.status.set_text('Grammar failed · using original text')
+        send_after = (not plan['format_requested'] and not plan['grammar_error'] and
                       (cue == 'send' or
                        (self.enter_button.get_active() and cue not in ('hold', 'format'))))
         if self.mode == 'buffer':

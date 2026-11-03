@@ -29,6 +29,8 @@ GTK widgets are updated on the GTK thread. Microphone capture runs in a worker t
 
 The **✦ Format** toggle persists between sessions. Saying **format** as the final word also formats that one dictation. After transcription, the app sends the cue-free text to the configured Azure chat deployment with a short instruction to improve clarity and grammar while keeping the speaker's wording and meaning. A formatted dictation never presses Enter automatically, including when the **↵** toggle or a spoken send cue is present. If formatting fails, the original wording is delivered without Enter and the popup stays open with an error. History keeps the raw Azure result in `transcript.txt` and the revised result, when available, in `formatted.txt`.
 
+The **Aa Grammar** toggle uses the same chat deployment with a lighter instruction: keep the full wording, correct grammar and spelling, add suitable line breaks, capitalize sentence starts, “I,” and people's names, and lowercase product and provider names except at sentence starts. Grammar and Format toggles are mutually exclusive; a final spoken **format** overrides Grammar for that dictation. Grammar follows the normal Enter setting and spoken send cues after a successful correction. If grammar correction fails, the original wording remains available for review and Enter is not pressed. History keeps the corrected result in `grammar.txt`, when available, alongside the raw transcript.
+
 Before displaying or delivering text, a literal `+` between two ASCII letters is changed to a space (for example, `speech+to+text` becomes `speech to text`). The raw Azure transcript remains unchanged in `transcript.txt` for diagnosis. This text cleanup is separate from the `ydotool` keymap, which corrects characters produced by a non-US keyboard layout during fallback typing.
 
 The hardcoded `WORD_CORRECTIONS` map in `app.py` also replaces whole-word recognition mistakes before delivery and in the History viewer. It currently maps `Klarvo` to `Clarvo`, regardless of case. Add another misspelling and preferred spelling there when a repeated error is confirmed. Raw transcripts on disk stay untouched.
@@ -55,10 +57,11 @@ Runtime data lives in `~/.local/share/live-dictation/`, outside the Git clone:
 | :-- | :-- |
 | `settings.json` | Last selected destination and Enter toggle |
 | `buffer-draft.txt` | Editable buffer between restarts |
-| `timings.jsonl` | Append-only recording, transcription, optional formatting, Azure request, delivery, paste, AT-SPI, and typing fallback durations, plus delivery method and result |
+| `timings.jsonl` | Append-only recording, transcription, optional Format or Grammar, Azure request, delivery, paste, AT-SPI, and typing fallback durations, plus delivery method and result |
 | `history/<timestamp-id>/audio.wav` | Recorded microphone audio |
 | `history/<timestamp-id>/transcript.txt` | Exact finalized transcript |
 | `history/<timestamp-id>/formatted.txt` | Revised text when Format succeeded |
+| `history/<timestamp-id>/grammar.txt` | Corrected text when Grammar succeeded |
 | `history/<timestamp-id>/events.jsonl` | Session and final transcription events |
 | `history/<timestamp-id>/metadata.json` | Session time, endpoint, model, and result |
 

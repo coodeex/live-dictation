@@ -26,6 +26,7 @@ history/
 *.jsonl
 transcript.txt
 formatted.txt
+grammar.txt
 buffer-draft.txt
 settings.json
 *.sqlite*
