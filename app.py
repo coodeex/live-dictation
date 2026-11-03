@@ -1401,19 +1401,22 @@ class Dictation:
                        'command_timeout': None, 'process': None, 'timed_out': False,
                        'attempted': False}
         self.paste_transaction = transaction
-        try:
-            self.clipboard.set_text(value, -1)
-        except Exception as error:
-            print(f'Could not set clipboard for paste: {error}', file=sys.stderr)
-            self._request_paste_restore(transaction)
-            return
         threading.Thread(target=self._verify_paste_clipboard, args=(transaction,),
                          daemon=True).start()
 
     def _verify_paste_clipboard(self, transaction):
-        # GTK owns the XWayland clipboard. Wait until the Wayland clipboard seen by
-        # native target apps actually contains this transcript before sending Ctrl+V.
-        if shutil.which('wl-paste') is None:
+        # Offer the text on the native Wayland clipboard, then verify exactly what
+        # the target app will see. Never send Ctrl+V while stale data is offered.
+        if shutil.which('wl-copy') is None or shutil.which('wl-paste') is None:
+            GLib.idle_add(self._paste_clipboard_verified, transaction, False)
+            return
+        try:
+            subprocess.run(['wl-copy'],
+                           input=transaction['value'].encode('utf-8'), timeout=3,
+                           check=True, stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL)
+        except (OSError, subprocess.SubprocessError) as error:
+            print(f'Could not offer Wayland clipboard text: {error}', file=sys.stderr)
             GLib.idle_add(self._paste_clipboard_verified, transaction, False)
             return
         deadline = time.monotonic() + PASTE_VERIFY_TIMEOUT_SECONDS
@@ -1433,6 +1436,9 @@ class Dictation:
         if self.paste_transaction is not transaction:
             return False
         if not ready:
+            self._request_paste_restore(transaction)
+            return False
+        if not self._target_focused():
             self._request_paste_restore(transaction)
             return False
         try:
@@ -1480,27 +1486,28 @@ class Dictation:
         if self.paste_transaction is not transaction:
             return False
         transaction['restore_timeout'] = GLib.timeout_add(
-            2000, self._paste_restore_timeout, transaction)
-        try:
-            self.clipboard.request_text(self._paste_restore_received, transaction)
-        except Exception as error:
-            print(f'Could not inspect clipboard after paste: {error}', file=sys.stderr)
-            self._finish_paste(transaction)
+            8000, self._paste_restore_timeout, transaction)
+        threading.Thread(target=self._restore_paste_clipboard,
+                         args=(transaction,), daemon=True).start()
         return False
 
-    def _paste_restore_received(self, clipboard, current_text, transaction):
-        if self.paste_transaction is not transaction:
-            return
+    def _restore_paste_clipboard(self, transaction):
         try:
-            if current_text == transaction['value']:
+            current = subprocess.run(['wl-paste', '--no-newline'], capture_output=True,
+                                     timeout=2, check=True).stdout.decode('utf-8')
+            if self.paste_transaction is transaction and current == transaction['value']:
                 if transaction['saved_text'] is not None:
-                    clipboard.set_text(transaction['saved_text'], -1)
+                    command = ['wl-copy']
+                    data = transaction['saved_text'].encode('utf-8')
                 else:
-                    clipboard.clear()
+                    command = ['wl-copy', '--clear']
+                    data = None
+                subprocess.run(command, input=data, timeout=3, check=True,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except Exception as error:
             print(f'Could not restore clipboard after paste: {error}', file=sys.stderr)
         finally:
-            self._finish_paste(transaction)
+            GLib.idle_add(self._finish_paste, transaction)
 
     def _paste_restore_timeout(self, transaction):
         if self.paste_transaction is transaction:
@@ -1519,6 +1526,7 @@ class Dictation:
         self.clipboard_snapshot = None
         transaction['done'](transaction['sent'], transaction['paste_seconds'],
                             transaction['attempted'])
+        return False
 
     def _type_target(self, value):
         target = self.target_accessible
@@ -1959,7 +1967,7 @@ class Dictation:
         if plan['grammar_error']:
             self.delivery_error = True
             self.status.set_text('Grammar failed · using original text')
-        send_after = (not plan['format_requested'] and not plan['grammar_error'] and
+        send_after = (not plan['format_requested'] and
                       (cue == 'send' or
                        (self.enter_button.get_active() and cue not in ('hold', 'format'))))
         if self.mode == 'buffer':
@@ -2016,21 +2024,12 @@ class Dictation:
                 metrics['delivery_method'] = 'paste-uncertain'
                 self.status.set_text('Paste result uncertain · transcript saved in History')
             elif not attempted:
-                typed, method, atspi_seconds, ydotool_seconds = self._type_target(message)
-                metrics['atspi_seconds'] = atspi_seconds
-                metrics['ydotool_seconds'] = ydotool_seconds
-                if typed:
-                    metrics['delivery_method'] = method
-                    if send_after and not self._press_enter():
-                        self.delivery_error = True
-                        self.status.set_text('Text inserted · Enter could not be pressed')
-                else:
-                    self.delivery_error = True
-                    buffer = self.text.get_buffer()
-                    buffer.insert(buffer.get_end_iter(), message)
-                    metrics['delivery_method'] = 'buffer'
-                    self.buffer_button.set_active(True)
-                    self.status.set_text('Clipboard was not ready · transcript kept in Buffer')
+                self.delivery_error = True
+                buffer = self.text.get_buffer()
+                buffer.insert(buffer.get_end_iter(), message)
+                metrics['delivery_method'] = 'buffer'
+                self.buffer_button.set_active(True)
+                self.status.set_text('Clipboard was not ready · transcript kept in Buffer')
             else:
                 self.delivery_error = True
                 buffer = self.text.get_buffer()
