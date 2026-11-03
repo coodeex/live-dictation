@@ -21,7 +21,7 @@ The panel opens at the top right of your primary monitor. Drag it elsewhere whil
 ## A few thoughtful controls
 
 - **A little polish on your desktop.** A draggable, always-on-top GTK panel with translucent forest-green glass and a live audio meter that shows when the microphone hears you.
-- **Speak at your own pace.** Recording continues through pauses. When you stop, the app transcribes the whole take and inserts one complete result.
+- **Speak at your own pace.** Recording continues through pauses. On longer takes, earlier parts are saved while you keep speaking, with a quiet progress cue in the panel. Stop whenever you like; the remaining speech is finished and delivered as one result.
 - **Write where you want.** Paste into the active caret, or collect text in an editable buffer to review and copy. Switch destinations while recording.
 - **Keep the music, or pause it.** Toggle automatic media pause for dictation; the app resumes only the players it paused.
 - **Choose your edit.** Grammar fixes spelling and punctuation while keeping your wording. Format makes rambling speech clearer and more concise. Both use AI; Format leaves sending to you.

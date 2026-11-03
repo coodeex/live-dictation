@@ -2,7 +2,9 @@
 """Azure live dictation, with a GTK buffer and durable per-session history."""
 import asyncio
 import audioop
+import concurrent.futures
 import datetime as dt
+import difflib
 import json
 import math
 import os
@@ -51,6 +53,10 @@ CONFIG_PATH = pathlib.Path(os.environ.get(
 BRIDGE = 'org.gnome.Shell.Extensions.LiveDictation'
 BRIDGE_PATH = '/org/gnome/Shell/Extensions/LiveDictation'
 HISTORY_PAGE_SIZE = 10
+PCM_BYTES_PER_SECOND = 24000 * 2
+FIRST_SEGMENT_TRIGGER = 90
+SEGMENT_STEP_SECONDS = 60
+SEGMENT_OVERLAP_SECONDS = 10
 COMPACT_WINDOW_SIZE = (534, 334)
 HISTORY_WINDOW_SIZE = (620, 700)
 WORD_CORRECTIONS = {'Klarvo': 'Clarvo'}
@@ -220,6 +226,57 @@ def delivery_plan(transcript, allow_hold=False, format_enabled=False,
             'format_error': None, 'grammar_error': None, 'grammar_seconds': None}
 
 
+def segment_window(index):
+    """Trigger at 1:30, 2:30, ... with ten seconds on each side of a minute."""
+    return (FIRST_SEGMENT_TRIGGER + index * SEGMENT_STEP_SECONDS,
+            max(0, index * SEGMENT_STEP_SECONDS - SEGMENT_OVERLAP_SECONDS),
+            (index + 1) * SEGMENT_STEP_SECONDS + SEGMENT_OVERLAP_SECONDS)
+
+
+def _speech_in_overlap(pcm, start, end):
+    """A quiet overlap needs no repeated words to join safely."""
+    section = pcm[int(start * PCM_BYTES_PER_SECOND):int(end * PCM_BYTES_PER_SECOND)]
+    frame_size = PCM_BYTES_PER_SECOND // 10
+    voiced = sum(audioop.rms(section[offset:offset + frame_size], 2) >= 120
+                 for offset in range(0, len(section) - frame_size + 1, frame_size))
+    return voiced >= 4
+
+
+def stitch_segments(parts, pcm):
+    """Join adjacent transcripts; return None when a spoken seam is uncertain."""
+    combined = parts[0][2].strip()
+    previous_end = parts[0][1]
+    for start, end, text in parts[1:]:
+        text = text.strip()
+        overlap_start = start
+        overlap_end = min(previous_end, end)
+        old_words = list(re.finditer(r"[\w']+", combined, re.UNICODE))[-90:]
+        new_words = list(re.finditer(r"[\w']+", text, re.UNICODE))[:90]
+        old_norm = [word.group().casefold().strip("'") for word in old_words]
+        new_norm = [word.group().casefold().strip("'") for word in new_words]
+        exact = next((size for size in range(min(len(old_norm), len(new_norm)), 0, -1)
+                      if old_norm[-size:] == new_norm[:size] and
+                      (size >= 2 and sum(map(len, old_norm[-size:])) >= 6 or
+                       size == 1 and len(old_norm[-1]) >= 10)), 0)
+        if exact:
+            text = text[new_words[exact - 1].end():].lstrip(' \t\r\n.,;:!?…')
+        else:
+            matches = difflib.SequenceMatcher(
+                None, old_norm, new_norm, autojunk=False).get_matching_blocks()
+            matches = [match for match in matches if match.size >= 5 and
+                       len(old_words) - (match.a + match.size) <= 5 and match.b <= 50]
+            if matches:
+                match = max(matches, key=lambda item: (item.a + item.size, item.size))
+                text = text[new_words[match.b + match.size - 1].end():].lstrip(
+                    ' \t\r\n.,;:!?…')
+            elif _speech_in_overlap(pcm, overlap_start, overlap_end):
+                return None
+        if text:
+            combined = (combined.rstrip() + ' ' + text).strip() if combined else text
+        previous_end = end
+    return combined
+
+
 def append_timing(session, recording_seconds, processing_seconds, status,
                   transcription_seconds=None, azure_seconds=None,
                   format_seconds=None, format_error=False,
@@ -324,6 +381,7 @@ class Session:
         self.started = dt.datetime.now().astimezone().isoformat()
         self.mode = mode
         self.events = (self.path / 'events.jsonl').open('a', buffering=1)
+        self.events_lock = threading.Lock()
         self.audio = wave.open(str(self.path / 'audio.wav'), 'wb')
         self.audio.setnchannels(1)
         self.audio.setsampwidth(2)
@@ -345,8 +403,20 @@ class Session:
                     indent=2) + '\n')
 
     def event(self, kind, **fields):
-        self.events.write(json.dumps({'time': dt.datetime.now().astimezone().isoformat(),
-                                      'kind': kind, **fields}, ensure_ascii=False) + '\n')
+        with self.events_lock:
+            if not self.events.closed:
+                self.events.write(json.dumps({'time': dt.datetime.now().astimezone().isoformat(),
+                                              'kind': kind, **fields}, ensure_ascii=False) + '\n')
+
+    def segment_path(self, index, start, end):
+        folder = self.path / 'segments'
+        folder.mkdir(mode=0o700, exist_ok=True)
+        return folder / f'{index + 1:03d}-{start:04.0f}-{end:04.0f}'
+
+    def save_segment_text(self, index, start, end, text):
+        atomic_text(self.segment_path(index, start, end).with_suffix('.txt'), text + '\n')
+        self.event('segment_saved', number=index + 1, start=start, end=end,
+                   characters=len(text))
 
     def set_transcript(self, text):
         self.final_text = text
@@ -378,7 +448,8 @@ class Session:
         self.close_audio()
         self.save_transcript()
         self.write_metadata()
-        self.events.close()
+        with self.events_lock:
+            self.events.close()
 
 
 class Dictation:
@@ -1589,6 +1660,7 @@ class Dictation:
             self.recording_dot.get_style_context().remove_class('ld-dot-active')
             self._set_wave_active(False)
             self._set_wave_processing(True)
+            self.live.get_style_context().remove_class('ld-segment-saved')
             self._stop_microphone_now()
             self.toggle_button.set_label('···')
             self.toggle_button.set_sensitive(False)
@@ -1625,6 +1697,7 @@ class Dictation:
             self.audio_loop = None
             self.audio_proc = None
             self.voice_frames = 0
+            self.segment_successes = set()
             self._open_top_right()
             self._set_cancel_visible(True)
             if self.mode == 'cursor':
@@ -1636,6 +1709,7 @@ class Dictation:
             self._set_wave_active(True)
             self.status.set_text('Recording · F4 to transcribe')
             self.live.set_text('')
+            self.live.get_style_context().remove_class('ld-segment-saved')
             self.worker = threading.Thread(target=self._run_thread,
                                            args=(key, self.session, self.stop_event, self.cancel_event),
                                            daemon=True)
@@ -1687,9 +1761,11 @@ class Dictation:
         azure_seconds = None
         plan = None
         format_seconds = None
+        segments = []
+        join_uncertain = False
         try:
             try:
-                asyncio.run(self._capture(session, stop))
+                pcm = asyncio.run(self._capture(key, session, stop, segments))
             finally:
                 GLib.idle_add(self._resume_music)
             session.close_audio()
@@ -1698,11 +1774,50 @@ class Dictation:
                 session.event('cancelled')
             else:
                 transcription_started = time.monotonic()
-                transcript, azure_seconds = self._transcribe_file(key, session)
+                if segments:
+                    duration = len(pcm) / PCM_BYTES_PER_SECOND
+                    tail_start = max(0, segments[-1]['end'] - 2 * SEGMENT_OVERLAP_SECONDS)
+                    tail_audio = pcm[int(tail_start * PCM_BYTES_PER_SECOND):]
+                    segments.append(self._start_segment(
+                        key, session, len(segments), tail_start, duration, tail_audio,
+                        early=False))
+                    try:
+                        completed = [segment['future'].result() for segment in segments]
+                    except Exception as error:
+                        session.event('segment_fallback', message=str(error))
+                        transcript, azure_seconds = self._transcribe_file(key, session)
+                    else:
+                        parts = [(segment['start'], segment['end'], text)
+                                 for segment, (text, _seconds) in zip(segments, completed)]
+                        unjoined = ' '.join(text.strip() for _start, _end, text in parts)
+                        transcript = stitch_segments(parts, pcm)
+                        azure_seconds = sum(seconds for _text, seconds in completed)
+                        words_before = len(unjoined.split())
+                        if (transcript is None or
+                                len(transcript.split()) < words_before * .58):
+                            atomic_text(session.path / 'segments-unjoined.txt', unjoined + '\n')
+                            session.event('segment_join_uncertain')
+                            try:
+                                full_text, full_seconds = self._transcribe_file(key, session)
+                            except Exception as error:
+                                session.event('segment_full_fallback_error', message=str(error))
+                                transcript = unjoined
+                                join_uncertain = True
+                            else:
+                                azure_seconds += full_seconds
+                                if len(full_text.split()) >= words_before * .60:
+                                    transcript = full_text
+                                else:
+                                    session.event('segment_full_fallback_short')
+                                    transcript = unjoined
+                                    join_uncertain = True
+                else:
+                    transcript, azure_seconds = self._transcribe_file(key, session)
                 transcription_seconds = time.monotonic() - transcription_started
                 session.set_transcript(transcript)
                 plan = delivery_plan(transcript, session.allow_hold,
                                      session.format_requested, session.grammar_requested)
+                plan['join_uncertain'] = join_uncertain
                 session.format_requested = plan['format_requested']
                 session.grammar_requested = plan['grammar_requested']
                 if session.format_requested and plan['message']:
@@ -1816,12 +1931,55 @@ class Dictation:
             self.status.set_text('Caret target unavailable · switch to Buffer')
         return False
 
-    async def _capture(self, session, stop):
+    def _start_segment(self, key, session, index, start, end, audio, early):
+        job = {'start': start, 'end': end, 'future': concurrent.futures.Future()}
+
+        def run():
+            try:
+                path = session.segment_path(index, start, end).with_suffix('.wav')
+                with wave.open(str(path), 'wb') as recording:
+                    recording.setnchannels(1)
+                    recording.setsampwidth(2)
+                    recording.setframerate(24000)
+                    recording.writeframes(audio)
+                text, seconds = self._transcribe_audio_path(key, path, timeout=90)
+                if not text and _speech_in_overlap(
+                        audio, 0, len(audio) / PCM_BYTES_PER_SECOND):
+                    raise RuntimeError('No words recognized in this part')
+                session.save_segment_text(index, start, end, text)
+                job['future'].set_result((text, seconds))
+                if early:
+                    GLib.idle_add(self._segment_saved_ui, session, index)
+            except Exception as error:
+                try:
+                    session.event('segment_error', number=index + 1, message=str(error))
+                except OSError:
+                    pass
+                if not job['future'].done():
+                    job['future'].set_exception(error)
+
+        threading.Thread(target=run, daemon=True).start()
+        return job
+
+    def _segment_saved_ui(self, session, index):
+        if self.session is session and self.stop_event is not None and not self.stop_event.is_set():
+            self.segment_successes.add(index)
+            count = 0
+            while count in self.segment_successes:
+                count += 1
+            if count:
+                self.live.set_text(f'✓ {count} saved')
+                self.live.get_style_context().add_class('ld-segment-saved')
+        return False
+
+    async def _capture(self, key, session, stop, segments):
         proc = await asyncio.create_subprocess_exec('parec', '--raw', '--format=s16le',
             '--rate=24000', '--channels=1', stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL)
         self.audio_loop = asyncio.get_running_loop()
         self.audio_proc = proc
+        pcm = bytearray()
+        next_trigger, _, _ = segment_window(0)
         try:
             while not stop.is_set():
                 try:
@@ -1837,6 +1995,15 @@ class Dictation:
                 level = min(1.0, max(0.0, (rms - 75) / 550))
                 GLib.idle_add(self._set_wave_level, session, level, rms)
                 session.audio.writeframesraw(chunk)
+                pcm.extend(chunk)
+                while len(pcm) >= next_trigger * PCM_BYTES_PER_SECOND:
+                    index = len(segments)
+                    _, start, end = segment_window(index)
+                    audio = bytes(pcm[int(start * PCM_BYTES_PER_SECOND):
+                                      int(end * PCM_BYTES_PER_SECOND)])
+                    segments.append(self._start_segment(
+                        key, session, index, start, end, audio, early=True))
+                    next_trigger, _, _ = segment_window(len(segments))
         finally:
             self._terminate_microphone()
             try:
@@ -1846,9 +2013,13 @@ class Dictation:
                 await proc.wait()
             self.audio_proc = None
             self.audio_loop = None
+        return bytes(pcm)
 
     def _transcribe_file(self, key, session):
         audio_path = session.path / 'audio.wav'
+        return self._transcribe_audio_path(key, audio_path)
+
+    def _transcribe_audio_path(self, key, audio_path, timeout=300):
         with wave.open(str(audio_path), 'rb') as recorded:
             if recorded.getnframes() == 0:
                 raise RuntimeError('No audio captured')
@@ -1881,7 +2052,7 @@ class Dictation:
                 'api-key': key, 'Content-Type': f'multipart/form-data; boundary={boundary}'})
             azure_started = time.monotonic()
             try:
-                with urllib.request.urlopen(request, timeout=300) as response:
+                with urllib.request.urlopen(request, timeout=timeout) as response:
                     payload = json.load(response)
             except urllib.error.HTTPError as error:
                 try:
@@ -1964,7 +2135,10 @@ class Dictation:
         if plan['grammar_error']:
             self.delivery_error = True
             self.status.set_text('Grammar failed · using original text')
-        send_after = (not plan['format_requested'] and
+        if plan.get('join_uncertain'):
+            self.delivery_error = True
+            self.status.set_text('Please review this dictation')
+        send_after = (not plan['format_requested'] and not plan.get('join_uncertain') and
                       (cue == 'send' or
                        (self.enter_button.get_active() and cue not in ('hold', 'format'))))
         if self.mode == 'buffer':

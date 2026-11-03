@@ -36,6 +36,7 @@ window.ld-opaque { background: #10251f; }
 .ld-title { color: @ld_text; font-size: 13px; font-weight: 600; }
 .ld-status { color: @ld_muted; font-size: 11px; }
 .ld-live { color: @ld_muted; font-size: 12px; font-style: italic; }
+.ld-live.ld-segment-saved { color: @ld_accent; font-style: normal; font-weight: 600; }
 .ld-timing {
     color: @ld_text;
     font-size: 12px;
