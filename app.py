@@ -56,7 +56,8 @@ FORMAT_PROMPT = ('Lead with the speaker\'s main point in the first sentence, usi
                  'only; do not copy their facts into the text. '
                  'Fix grammar, repetition, and capitalization, including the '
                  'pronoun I. Make the text clearer and shorter while keeping the speaker\'s '
-                 'words and meaning. Add no facts or structure. Output only the revised text.')
+                 'words and meaning. Do not use em dashes; use commas or periods instead. '
+                 'Add no facts or structure. Output only the revised text.')
 PASTE_RESTORE_DELAY_MS = 1200
 PASTE_VERIFY_TIMEOUT_SECONDS = 1.5
 PASTE_KEYS = {
@@ -387,7 +388,6 @@ class Dictation:
         self.voice_frames = 0
         self.mic_warning_timer = None
         self.mic_warning_dialog = None
-        self.copy_feedback_timer = None
         self.timing_timer = None
         self.close_timer = None
         self.record_started = None
@@ -580,7 +580,7 @@ class Dictation:
         self.copy_button.set_relief(Gtk.ReliefStyle.NONE)
         self.copy_button.set_can_focus(False)
         self.copy_button.set_size_request(28, 28)
-        self.copy_button.set_tooltip_text('Copy buffer')
+        self.copy_button.set_tooltip_text('Copy buffer, clear it, and close')
         self.copy_button.get_style_context().add_class('ld-copy-icon')
         self.copy_button.connect('clicked', self._copy)
         self.clear_button = Gtk.Button(
@@ -1216,12 +1216,9 @@ class Dictation:
         buffer = self.text.get_buffer()
         value = buffer.get_text(buffer.get_start_iter(), buffer.get_end_iter(), True)
         Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD).set_text(value, -1)
-        self.status.set_text('Buffer copied')
-        self.copy_icon.set_from_icon_name('emblem-ok-symbolic', Gtk.IconSize.MENU)
-        self.copy_button.get_style_context().add_class('ld-copy-success')
-        if self.copy_feedback_timer is not None:
-            GLib.source_remove(self.copy_feedback_timer)
-        self.copy_feedback_timer = GLib.timeout_add(2000, self._reset_copy_icon)
+        buffer.set_text('')
+        self.cursor_button.set_active(True)
+        self._close_popup()
 
     def _confirm_clear_buffer(self, *_args):
         dialog = Gtk.MessageDialog(
@@ -1241,12 +1238,6 @@ class Dictation:
         if response == Gtk.ResponseType.ACCEPT:
             self.text.get_buffer().set_text('')
             self.status.set_text('Buffer cleared')
-
-    def _reset_copy_icon(self):
-        self.copy_icon.set_from_icon_name('edit-copy-symbolic', Gtk.IconSize.MENU)
-        self.copy_button.get_style_context().remove_class('ld-copy-success')
-        self.copy_feedback_timer = None
-        return False
 
     def _buffer_changed(self, buffer):
         value = buffer.get_text(buffer.get_start_iter(), buffer.get_end_iter(), True)
@@ -1802,7 +1793,7 @@ class Dictation:
         content = choice.get('message', {}).get('content')
         if not isinstance(content, str) or not content.strip():
             raise RuntimeError('Azure formatting returned no text')
-        return content.strip()
+        return re.sub(r'[ \t]*—+[ \t]*', ' ', content).strip()
 
     def _text_event(self, session, plan, done):
         metrics = {'delivery_method': None, 'atspi_seconds': None,
