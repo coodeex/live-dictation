@@ -1,0 +1,5 @@
+#!/bin/sh
+set -eu
+export LIVE_DICTATION_INSTANCE=dev
+export GDK_BACKEND=x11
+exec python3 "$(dirname "$0")/../app.py"

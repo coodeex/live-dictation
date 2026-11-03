@@ -30,13 +30,19 @@ gi.require_version('Atspi', '2.0')
 gi.require_version('Pango', '1.0')
 from gi.repository import Atspi, Gdk, Gio, GLib, Gtk, Pango
 
-ROOT = pathlib.Path.home() / '.local/share/live-dictation'
+INSTANCE = os.environ.get('LIVE_DICTATION_INSTANCE', 'production')
+if INSTANCE not in ('production', 'dev'):
+    raise RuntimeError('LIVE_DICTATION_INSTANCE must be production or dev')
+IS_DEV = INSTANCE == 'dev'
+ROOT = pathlib.Path.home() / ('.local/share/live-dictation-dev' if IS_DEV else
+                              '.local/share/live-dictation')
 HISTORY = ROOT / 'history'
 SETTINGS = ROOT / 'settings.json'
 DRAFT = ROOT / 'buffer-draft.txt'
 TIMINGS = ROOT / 'timings.jsonl'
 STYLE = pathlib.Path(__file__).with_name('style.css')
-SOCKET = pathlib.Path(os.environ.get('XDG_RUNTIME_DIR', f'/run/user/{os.getuid()}')) / 'live-dictation.sock'
+SOCKET = pathlib.Path(os.environ.get('XDG_RUNTIME_DIR', f'/run/user/{os.getuid()}')) / (
+    'live-dictation-dev.sock' if IS_DEV else 'live-dictation.sock')
 CONFIG_HOME = pathlib.Path(os.environ.get(
     'XDG_CONFIG_HOME', pathlib.Path.home() / '.config')).expanduser()
 CONFIG_PATH = pathlib.Path(os.environ.get(
@@ -121,6 +127,8 @@ def api_key():
 
 
 def bridge(method):
+    if IS_DEV:
+        return None  # Never control production's GNOME focus helper from the dev instance.
     try:
         result = subprocess.run(['gdbus', 'call', '--session', '--dest', BRIDGE,
                                  '--object-path', BRIDGE_PATH,
@@ -357,7 +365,8 @@ class Dictation:
         os.chmod(HISTORY, 0o700)
         TIMINGS.touch(mode=0o600, exist_ok=True)
         os.chmod(TIMINGS, 0o600)
-        self.prefs = {'mode': 'cursor', 'press_enter': False, 'pause_music': False,
+        self.prefs = {'mode': 'buffer' if IS_DEV else 'cursor',
+                      'press_enter': False, 'pause_music': False,
                       'format': False,
                       'caret_insertion': 'paste'}
         if SETTINGS.exists():
@@ -414,8 +423,10 @@ class Dictation:
         self.css_provider = provider
 
     def _build_ui(self):
-        w = self.window = Gtk.Window(title='Live dictation')
-        w.set_wmclass('live-dictation', 'live-dictation')
+        title_text = 'Live dictation · DEV' if IS_DEV else 'Live dictation'
+        w = self.window = Gtk.Window(title=title_text)
+        wmclass = 'live-dictation-dev' if IS_DEV else 'live-dictation'
+        w.set_wmclass(wmclass, wmclass)
         w.set_default_size(*COMPACT_WINDOW_SIZE)
         w.set_size_request(*COMPACT_WINDOW_SIZE)
         w.set_resizable(False)
@@ -467,7 +478,7 @@ class Dictation:
         header_row.pack_start(title_handle, True, True, 0)
         title_stack = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         title_handle.add(title_stack)
-        title = Gtk.Label(label='Live dictation')
+        title = Gtk.Label(label=title_text)
         title.set_xalign(0)
         title.get_style_context().add_class('ld-title')
         title_stack.pack_start(title, False, False, 0)

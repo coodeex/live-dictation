@@ -1,0 +1,4 @@
+#!/bin/sh
+set -eu
+export LIVE_DICTATION_INSTANCE=dev
+exec python3 "$(dirname "$0")/../client.py" "$@"

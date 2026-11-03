@@ -107,3 +107,28 @@ When F4 stops recording, the app saves the current text clipboard in memory. Bef
 | Inspect logs | `journalctl --user -u live-dictation.service -n 50 --no-pager` |
 
 The `cursor` command is the internal name for the UI's **Caret** destination. See [How it works](ARCHITECTURE.md) for the recording, transcription, and history paths.
+
+## Develop alongside the daily app
+
+Keep the checkout used by the systemd service as production. Create a separate
+worktree for changes:
+
+```bash
+git worktree add --detach ../live-dictation-dev main
+cd ../live-dictation-dev
+./scripts/dev-app
+```
+
+In another terminal, use `./scripts/dev-client show`, `buffer`, `toggle`, or
+`status`. The dev instance has its own socket, history, draft, and settings;
+the F4 shortcut still controls production. Its header says **DEV** so the two
+windows are easy to tell apart. It shares the private Azure configuration but
+does not use the production GNOME focus helper. Test Caret mode in a scratch
+editor rather than an active document.
+
+After testing and committing changes in the dev worktree, run
+`python3 scripts/release.py --tested`. The release command pushes the dev
+commit to GitHub `main`, waits until production is idle and its popup has been
+closed for three continuous seconds, then fast-forwards the production checkout
+and restarts its user service. `--dry-run` checks prerequisites without changing
+GitHub or production.
