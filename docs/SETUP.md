@@ -121,8 +121,9 @@ cd ../live-dictation-dev
 
 In another terminal, use `./scripts/dev-client show`, `buffer`, `toggle`, or
 `status`. The dev instance has its own socket, history, draft, and settings;
-the F4 shortcut still controls production. Its header says **DEV** so the two
-windows are easy to tell apart. It shares the private Azure configuration but
+the F4 shortcut still controls production. Its header says **DEV** and uses a
+charcoal-and-gray palette so the two windows are easy to tell apart. It shares
+the private Azure configuration but
 does not use the production GNOME focus helper. Test Caret mode in a scratch
 editor rather than an active document.
 

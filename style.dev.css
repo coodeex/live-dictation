@@ -1,0 +1,135 @@
+/* Loaded only when LIVE_DICTATION_INSTANCE=dev. Layout stays in style.css. */
+@define-color ld_text rgba(245,246,248,0.94);
+@define-color ld_muted rgba(220,222,227,0.62);
+@define-color ld_accent #c6c9d0;
+@define-color ld_accent2 #969ba5;
+@define-color ld_accent_hi #e4e6eb;
+@define-color ld_on_accent #191b20;
+
+window.ld-opaque { background: #17181b; }
+
+.ld-card {
+    background-image: linear-gradient(145deg,
+        rgba(43, 44, 49, 0.86) 0%,
+        rgba(14, 15, 18, 0.82) 100%);
+    border-color: rgba(226, 228, 233, 0.15);
+    color: @ld_text;
+}
+
+.ld-title, .ld-timing, .ld-history-date { color: @ld_text; }
+.ld-status, .ld-live, .ld-history-duration,
+.ld-history-page, .ld-history-empty { color: @ld_muted; }
+
+.ld-waveform-frame {
+    background-color: rgba(198, 201, 208, 0.08);
+    border-color: rgba(198, 201, 208, 0.25);
+}
+.ld-waveform-frame.ld-waveform-active {
+    background-color: rgba(198, 201, 208, 0.12);
+    border-color: rgba(198, 201, 208, 0.38);
+    box-shadow: inset 0 0 10px rgba(198, 201, 208, 0.12);
+}
+.ld-waveform-frame.ld-waveform-processing {
+    background-color: rgba(198, 201, 208, 0.16);
+    border-color: rgba(228, 230, 235, 0.55);
+    box-shadow: inset 0 0 12px rgba(198, 201, 208, 0.16),
+                0 0 12px rgba(198, 201, 208, 0.18);
+}
+
+.ld-dot { background-color: rgba(220, 222, 227, 0.30); }
+/* Keep the active recording dot red so recording remains unmistakable. */
+.ld-dot-processing {
+    background-color: @ld_accent;
+    box-shadow: 0 0 8px rgba(198, 201, 208, 0.65);
+}
+
+.ld-seg-btn {
+    background-image: none;
+    background-color: rgba(220, 222, 227, 0.07);
+    color: rgba(245, 246, 248, 0.72);
+    border-color: rgba(226, 228, 233, 0.10);
+}
+.ld-seg-btn:hover { background-color: rgba(220, 222, 227, 0.13); }
+.ld-seg-btn:checked {
+    background-image: linear-gradient(180deg, @ld_accent, @ld_accent2);
+    background-color: @ld_accent2;
+    color: @ld_on_accent;
+}
+
+.ld-format-toggle, .ld-enter-toggle, .ld-music-toggle {
+    background-image: none;
+    background-color: rgba(220, 222, 227, 0.07);
+    color: rgba(245, 246, 248, 0.72);
+    border-color: rgba(226, 228, 233, 0.12);
+}
+.ld-format-toggle:hover, .ld-enter-toggle:hover, .ld-music-toggle:hover {
+    background-color: rgba(220, 222, 227, 0.14);
+}
+.ld-format-toggle:checked, .ld-enter-toggle:checked, .ld-music-toggle:checked {
+    background-image: linear-gradient(180deg, @ld_accent, @ld_accent2);
+    color: @ld_on_accent;
+}
+
+.ld-close {
+    background-image: none;
+    background-color: rgba(220, 222, 227, 0.08);
+    color: rgba(245, 246, 248, 0.72);
+}
+.ld-close:hover {
+    background-color: rgba(228, 230, 235, 0.90);
+    color: #191b20;
+}
+
+.ld-editor-frame, .ld-history-card, .ld-history-full {
+    background-color: rgba(3, 4, 6, 0.38);
+    border-color: rgba(226, 228, 233, 0.11);
+}
+textview.ld-editor, textview.ld-editor text,
+textview.ld-history-text, textview.ld-history-text text {
+    background-color: transparent;
+    color: @ld_text;
+    caret-color: @ld_accent_hi;
+}
+textview.ld-editor text selection {
+    background-color: rgba(198, 201, 208, 0.40);
+    color: #ffffff;
+}
+.ld-editor-frame scrollbar slider {
+    background-color: rgba(226, 228, 233, 0.28);
+}
+.ld-editor-frame scrollbar slider:hover {
+    background-color: rgba(226, 228, 233, 0.50);
+}
+
+.ld-copy-icon {
+    background-image: none;
+    background-color: rgba(220, 222, 227, 0.10);
+    color: rgba(245, 246, 248, 0.84);
+    border-color: rgba(226, 228, 233, 0.15);
+}
+.ld-copy-icon:hover { background-color: rgba(220, 222, 227, 0.18); }
+.ld-copy-icon.ld-copy-success {
+    background-color: rgba(198, 201, 208, 0.18);
+    color: @ld_accent;
+}
+
+.ld-primary {
+    background-image: linear-gradient(180deg, @ld_accent, @ld_accent2);
+    color: @ld_on_accent;
+    box-shadow: 0 2px 10px rgba(150, 155, 165, 0.35);
+}
+.ld-primary:hover {
+    background-image: linear-gradient(180deg, @ld_accent_hi, @ld_accent);
+}
+.ld-primary:active {
+    background-image: none;
+    background-color: @ld_accent2;
+}
+.ld-ghost {
+    background-image: none;
+    background-color: rgba(220, 222, 227, 0.09);
+    color: rgba(245, 246, 248, 0.90);
+}
+.ld-ghost:hover { background-color: rgba(220, 222, 227, 0.16); }
+.ld-ghost:active { background-color: rgba(220, 222, 227, 0.24); }
+.ld-history-preview { color: rgba(245, 246, 248, 0.82); }

@@ -41,6 +41,7 @@ SETTINGS = ROOT / 'settings.json'
 DRAFT = ROOT / 'buffer-draft.txt'
 TIMINGS = ROOT / 'timings.jsonl'
 STYLE = pathlib.Path(__file__).with_name('style.css')
+DEV_STYLE = pathlib.Path(__file__).with_name('style.dev.css')
 SOCKET = pathlib.Path(os.environ.get('XDG_RUNTIME_DIR', f'/run/user/{os.getuid()}')) / (
     'live-dictation-dev.sock' if IS_DEV else 'live-dictation.sock')
 CONFIG_HOME = pathlib.Path(os.environ.get(
@@ -421,6 +422,16 @@ class Dictation:
         Gtk.StyleContext.add_provider_for_screen(
             Gdk.Screen.get_default(), provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
         self.css_provider = provider
+        if IS_DEV:
+            dev_provider = Gtk.CssProvider()
+            try:
+                dev_provider.load_from_data(DEV_STYLE.read_text(encoding='utf-8').encode('utf-8'))
+            except (GLib.Error, OSError) as error:
+                print(f'Dev CSS error: {error}', file=sys.stderr)
+            Gtk.StyleContext.add_provider_for_screen(
+                Gdk.Screen.get_default(), dev_provider,
+                Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION + 1)
+            self.dev_css_provider = dev_provider
 
     def _build_ui(self):
         title_text = 'Live dictation · DEV' if IS_DEV else 'Live dictation'
@@ -881,9 +892,15 @@ class Dictation:
             context.arc(x + radius, y + bar_height - radius, radius, 0, math.pi)
             context.close_path()
             if self.wave_processing:
-                context.set_source_rgba(0.431, 0.906, 0.718, 0.24 + 0.72 * glow)
+                if IS_DEV:
+                    context.set_source_rgba(0.90, 0.91, 0.94, 0.24 + 0.72 * glow)
+                else:
+                    context.set_source_rgba(0.431, 0.906, 0.718, 0.24 + 0.72 * glow)
             elif self.wave_active:
-                context.set_source_rgba(0.204, 0.827, 0.600, 0.55 + 0.35 * level)
+                if IS_DEV:
+                    context.set_source_rgba(0.76, 0.78, 0.82, 0.55 + 0.35 * level)
+                else:
+                    context.set_source_rgba(0.204, 0.827, 0.600, 0.55 + 0.35 * level)
             else:
                 context.set_source_rgba(1.0, 1.0, 1.0, 0.23)
             context.fill()
