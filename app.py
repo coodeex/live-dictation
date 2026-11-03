@@ -545,10 +545,14 @@ class Dictation:
         self.format_button.get_style_context().add_class('ld-format-toggle')
         self.format_button.connect('toggled', self._format_changed)
         header_row.pack_start(self.format_button, False, False, 0)
-        self.grammar_button = Gtk.ToggleButton(label='Aa')
+        self.grammar_button = Gtk.ToggleButton()
         self.grammar_button.set_relief(Gtk.ReliefStyle.NONE)
         self.grammar_button.set_can_focus(False)
         self.grammar_button.set_size_request(24, 24)
+        self.grammar_icon = Gtk.DrawingArea()
+        self.grammar_icon.set_size_request(19, 19)
+        self.grammar_icon.connect('draw', self._draw_grammar_icon)
+        self.grammar_button.add(self.grammar_icon)
         self.grammar_button.set_active(
             self.prefs.get('grammar') is True and not self.format_button.get_active())
         self.grammar_button.set_tooltip_text(
@@ -1181,6 +1185,25 @@ class Dictation:
             self.format_button.set_active(False)
         self.prefs['grammar'] = button.get_active()
         self._save_prefs()
+        self.grammar_icon.queue_draw()
+
+    def _draw_grammar_icon(self, _widget, context):
+        color = self.grammar_button.get_style_context().get_color(
+            self.grammar_button.get_state_flags())
+        context.set_source_rgba(color.red, color.green, color.blue, color.alpha)
+        context.scale(self.grammar_icon.get_allocated_width() / 24.0,
+                      self.grammar_icon.get_allocated_height() / 24.0)
+        context.set_line_width(2.2)
+        context.set_line_cap(1)  # Cairo round cap.
+        context.set_line_join(1)  # Cairo round join.
+        for start, end, y in ((3, 20, 5), (3, 20, 10), (3, 12, 15)):
+            context.move_to(start, y)
+            context.line_to(end, y)
+        context.move_to(11, 18)
+        context.line_to(15, 21)
+        context.line_to(22, 12)
+        context.stroke()
+        return False
 
     def _music_changed(self, button):
         self.prefs['pause_music'] = button.get_active()

@@ -132,7 +132,6 @@ window.ld-opaque { background: #10251f; }
 .ld-grammar-toggle:disabled,
 .ld-enter-toggle:disabled,
 .ld-music-toggle:disabled { opacity: 0.48; }
-.ld-grammar-toggle { font-size: 12px; font-weight: 700; }
 
 .ld-close {
     background-image: none;

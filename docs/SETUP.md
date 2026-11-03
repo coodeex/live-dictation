@@ -28,7 +28,7 @@ chmod 600 ~/.config/live-dictation/config.json
 ${EDITOR:-nano} ~/.config/live-dictation/config.json
 ```
 
-Set `azure_endpoint` to your Azure OpenAI resource URL and `deployment` to your `gpt-transcribe` deployment name. To use the optional **✦ Format** or **Aa Grammar** mode, set `format_deployment` to a chat-completions deployment in the same Azure resource; both modes share it. The example points `api_key_file` at `~/.config/live-dictation/azure.env`. Create that file with user-only permissions and add one line, `AZURE_OPENAI_API_KEY=...`:
+Set `azure_endpoint` to your Azure OpenAI resource URL and `deployment` to your `gpt-transcribe` deployment name. To use the optional **✦ Format** or **Grammar** mode, set `format_deployment` to a chat-completions deployment in the same Azure resource; both modes share it. The example points `api_key_file` at `~/.config/live-dictation/azure.env`. Create that file with user-only permissions and add one line, `AZURE_OPENAI_API_KEY=...`:
 
 ```bash
 install -m 600 /dev/null ~/.config/live-dictation/azure.env
