@@ -4,7 +4,7 @@
 Shortcut / button → client.py → local Unix socket → GTK app
                                                │
 Microphone (parec, 24 kHz PCM) → local audio.wav
-                                               │ after F4 stops recording
+                                               │ during recording and after F4
                                                ▼
                               Azure file transcription
                                                │ completed text only
@@ -21,13 +21,13 @@ Microphone (parec, 24 kHz PCM) → local audio.wav
 
 The yellow-hover **×** closes the popup without stopping the background service, so F4 can open it again. If recording is in progress, closing the popup cancels that recording first.
 
-GTK widgets are updated on the GTK thread. Microphone capture runs in a worker thread and writes a local WAV while the audio meter observes the same PCM chunks. F4 stops recording and transcribes; silence does not stop it. The Cancel button appears only during recording and stops capture without uploading or inserting text. The popup stays open and returns to Ready after cancellation; cancelled audio remains in History. After F4, the worker sends the completed file to Azure's audio transcription endpoint and sends the final transcript back to GTK through `GLib.idle_add`.
+GTK widgets are updated on the GTK thread. Microphone capture runs in a worker thread and writes a local WAV while the audio meter observes the same PCM chunks. F4 stops recording; silence does not stop it. The Cancel button appears only during recording and stops capture without inserting text. The popup stays open and returns to Ready after cancellation; cancelled audio remains in History. Short recordings are sent to Azure after F4; longer recordings begin transcription during capture. The worker sends the final transcript back to GTK through `GLib.idle_add`.
 
 ## Two destinations
 
 **Caret** pastes the completed transcript into the original focused field by default. At F4, the app snapshots the current text clipboard while Azure transcribes. Under the popup's XWayland backend, GTK offers the completed text on the X11 clipboard, then `xclip` verifies the exact text without changing focus. The app sends a single `ydotool key ctrl+v` shortcut. After the shortcut, it restores the old text only if the clipboard still contains the dictation. Rich clipboard formats may be lost. The original AT-SPI/`ydotool type` method remains available through `client.py type`; `client.py paste` switches back. If target focus changes or clipboard verification fails, the transcript is placed in Buffer and the popup stays open for copying. A failed paste never falls back to typing a long transcript.
 
-For recordings shorter than 1:30, the app transcribes the completed WAV as before. At 1:30 it saves and transcribes 0:00–1:10 while recording continues. At 2:30 it does 0:50–2:10, then repeats every minute with ten seconds on each side of the minute boundary. Completed parts are saved under the session's `segments/` folder, and the popup quietly shows how many have been saved. At stop, only the remaining tail is sent. Matching words in the overlapping audio join the text; if a part fails or a spoken join is uncertain, the complete WAV is transcribed instead. If the complete pass is also missing substantial text, the app keeps the saved parts, pastes them for review, and does not press Enter automatically. The full audio remains in History in every case.
+For recordings shorter than 0:50, the app transcribes the completed WAV as before. At 0:50 it saves and transcribes 0:00–0:40 while recording continues. At 1:30 it does 0:20–1:10, at 2:30 it does 0:50–2:10, then repeats every minute with overlapping audio on each side of the minute boundary. Completed parts are saved under the session's `segments/` folder, and the popup quietly shows how many have been saved. At stop, only the remaining tail is sent. Matching words in the overlapping audio join the text; if a part fails or a spoken join is uncertain, the complete WAV is transcribed instead. If the complete pass is also missing substantial text, the app keeps the saved parts, pastes them for review, and does not press Enter automatically. The full audio remains in History in every case.
 
 The **✦ Format** toggle persists between sessions. Saying **format** as the final word also formats that one dictation. After transcription, the app sends the cue-free text to the configured Azure chat deployment with a short instruction to improve clarity and grammar while keeping the speaker's wording and meaning. A formatted dictation never presses Enter automatically, including when the **↵** toggle or a spoken send cue is present. If formatting fails, the original wording is delivered without Enter and the popup stays open with an error. History keeps the raw Azure result in `transcript.txt` and the revised result, when available, in `formatted.txt`.
 
@@ -62,7 +62,7 @@ Runtime data lives in `~/.local/share/live-dictation/`, outside the Git clone:
 | `timings.jsonl` | Append-only recording, transcription, optional Format or Grammar, Azure request, delivery, paste, AT-SPI, and typing fallback durations, plus delivery method and result |
 | `history/<timestamp-id>/audio.wav` | Recorded microphone audio |
 | `history/<timestamp-id>/transcript.txt` | Exact finalized transcript |
-| `history/<timestamp-id>/segments/*.wav` and `*.txt` | Audio and recognized text for each completed part of a long recording |
+| `history/<timestamp-id>/segments/*.wav` and `*.txt` | Audio and recognized text for each completed part of a segmented recording |
 | `history/<timestamp-id>/segments-unjoined.txt` | Conservative recovery text when a join needs review |
 | `history/<timestamp-id>/formatted.txt` | Revised text when Format succeeded |
 | `history/<timestamp-id>/grammar.txt` | Corrected text when Grammar succeeded |
@@ -71,4 +71,4 @@ Runtime data lives in `~/.local/share/live-dictation/`, outside the Git clone:
 
 History is retained until you remove it. The data directory and files are created with user-only permissions. The API key is read from the process environment or a private file named in `~/.config/live-dictation/config.json`; its value is not written to history.
 
-For short recordings, audio is sent to your configured Azure OpenAI resource after recording stops. For recordings longer than 1:30, completed parts are sent while you continue speaking, and the last part is sent when you stop. The file endpoint accepts up to 25 MB per request. For a long full-audio fallback, the app creates a temporary compressed MP3 for upload while keeping the original WAV in History. The finalized wording is preserved in `transcript.txt`.
+For recordings shorter than 0:50, audio is sent to your configured Azure OpenAI resource after recording stops. For longer recordings, completed parts are sent while you continue speaking, and the last part is sent when you stop. The file endpoint accepts up to 25 MB per request. For a long full-audio fallback, the app creates a temporary compressed MP3 for upload while keeping the original WAV in History. The finalized wording is preserved in `transcript.txt`.

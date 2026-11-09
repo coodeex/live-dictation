@@ -18,12 +18,13 @@ import app
 
 class SegmentTests(unittest.TestCase):
     def test_trigger_windows_and_final_tail_cover_every_stop(self):
-        self.assertEqual(app.segment_window(0), (90, 0, 70))
-        self.assertEqual(app.segment_window(1), (150, 50, 130))
-        self.assertEqual(app.segment_window(6), (450, 350, 430))
-        self.assertEqual((app.segment_window(6)[2] - 20, 475), (410, 475))
-        self.assertEqual((app.segment_window(6)[2] - 20, 500), (410, 500))
-        for stop in (89, 90, 91, 149, 150, 151, 475, 500):
+        self.assertEqual(app.segment_window(0), (50, 0, 40))
+        self.assertEqual(app.segment_window(1), (90, 20, 70))
+        self.assertEqual(app.segment_window(2), (150, 50, 130))
+        self.assertEqual(app.segment_window(7), (450, 350, 430))
+        self.assertEqual((app.segment_window(7)[2] - 20, 475), (410, 475))
+        self.assertEqual((app.segment_window(7)[2] - 20, 500), (410, 500))
+        for stop in (49, 50, 51, 59, 60, 89, 90, 91, 149, 150, 151, 475, 500):
             windows = []
             index = 0
             while app.segment_window(index)[0] <= stop:
@@ -155,8 +156,9 @@ class SegmentTests(unittest.TestCase):
             pcm = asyncio.run(dictation._capture('key', Session(), stop, []))
         self.assertEqual(len(pcm), 150 * app.PCM_BYTES_PER_SECOND)
         self.assertEqual(jobs, [
-            (0, 0, 70, 70 * app.PCM_BYTES_PER_SECOND, True),
-            (1, 50, 130, 80 * app.PCM_BYTES_PER_SECOND, True),
+            (0, 0, 40, 40 * app.PCM_BYTES_PER_SECOND, True),
+            (1, 20, 70, 50 * app.PCM_BYTES_PER_SECOND, True),
+            (2, 50, 130, 80 * app.PCM_BYTES_PER_SECOND, True),
         ])
 
     def test_uncertain_join_is_pasted_for_review_without_enter(self):

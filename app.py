@@ -54,7 +54,8 @@ BRIDGE = 'org.gnome.Shell.Extensions.LiveDictation'
 BRIDGE_PATH = '/org/gnome/Shell/Extensions/LiveDictation'
 HISTORY_PAGE_SIZE = 10
 PCM_BYTES_PER_SECOND = 24000 * 2
-FIRST_SEGMENT_TRIGGER = 90
+FIRST_SEGMENT_TRIGGER = 50
+FIRST_SEGMENT_END = 40
 SEGMENT_STEP_SECONDS = 60
 SEGMENT_OVERLAP_SECONDS = 10
 COMPACT_WINDOW_SIZE = (534, 334)
@@ -77,7 +78,7 @@ GRAMMAR_PROMPT = ('Return the full dictated text with the same words, order, mea
                   'people\'s names. Write product and provider names in lowercase, such as '
                   'postgresql, chatgpt, claude, and google, except when one begins a sentence. '
                   'Do not summarize, shorten, or rephrase for style. Output only the revised text.')
-PASTE_RESTORE_DELAY_MS = 1200
+PASTE_RESTORE_DELAY_MS = 600
 PASTE_VERIFY_TIMEOUT_SECONDS = 1.5
 # ydotool key takes shortcut names; numeric press/release tokens type garbage.
 PASTE_KEYS = {
@@ -227,10 +228,14 @@ def delivery_plan(transcript, allow_hold=False, format_enabled=False,
 
 
 def segment_window(index):
-    """Trigger at 1:30, 2:30, ... with ten seconds on each side of a minute."""
-    return (FIRST_SEGMENT_TRIGGER + index * SEGMENT_STEP_SECONDS,
-            max(0, index * SEGMENT_STEP_SECONDS - SEGMENT_OVERLAP_SECONDS),
-            (index + 1) * SEGMENT_STEP_SECONDS + SEGMENT_OVERLAP_SECONDS)
+    """Start a short first part at 0:50, then continue the overlapping parts."""
+    if index == 0:
+        return FIRST_SEGMENT_TRIGGER, 0, FIRST_SEGMENT_END
+    trigger = 90 + (index - 1) * SEGMENT_STEP_SECONDS
+    end = index * SEGMENT_STEP_SECONDS + SEGMENT_OVERLAP_SECONDS
+    start = (FIRST_SEGMENT_END - 2 * SEGMENT_OVERLAP_SECONDS if index == 1 else
+             (index - 1) * SEGMENT_STEP_SECONDS - SEGMENT_OVERLAP_SECONDS)
+    return trigger, start, end
 
 
 def _speech_in_overlap(pcm, start, end):
