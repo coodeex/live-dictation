@@ -18,7 +18,7 @@ from gi.repository import Gdk, GLib, Gtk
     Gdk.Display.get_default().get_name().startswith(':'),
     'requires an explicitly selected isolated X11 display and xclip')
 class ClipboardPasteTests(unittest.TestCase):
-    def test_delayed_paste_reads_dictation_before_old_url_is_restored(self):
+    def test_delayed_paste_reads_dictation_even_after_shortcut_exits(self):
         class SuccessfulShortcut:
             def wait_finish(self, _result):
                 return True
@@ -30,7 +30,7 @@ class ClipboardPasteTests(unittest.TestCase):
         old_url = 'https://example.test/copied-link'
         dictated = 'Please check my downloads for the audio file.'
 
-        for request_delay in (100, 1500):
+        for request_delay in (100, 3000):
             with self.subTest(request_delay=request_delay):
                 clipboard.set_text(old_url, -1)
                 buffer = Gtk.TextBuffer()
@@ -63,7 +63,7 @@ class ClipboardPasteTests(unittest.TestCase):
                     dictation.session, dictated,
                     lambda sent, _seconds, attempted: result.update(
                         sent=sent, attempted=attempted))
-                GLib.timeout_add(2200, lambda: (loop.quit(), False)[1])
+                GLib.timeout_add(request_delay + 250, lambda: (loop.quit(), False)[1])
                 loop.run()
 
                 pasted = buffer.get_text(
@@ -72,7 +72,35 @@ class ClipboardPasteTests(unittest.TestCase):
                 self.assertTrue(result.get('sent'))
                 self.assertTrue(result.get('attempted'))
                 self.assertEqual(pasted, dictated)
-                self.assertEqual(clipboard.wait_for_text(), old_url)
+                self.assertEqual(clipboard.wait_for_text(), dictated)
+
+    def test_aborted_paste_restores_previous_clipboard(self):
+        clipboard = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
+        old_url = 'https://example.test/copied-link'
+        dictated = 'Please check my downloads for the audio file.'
+        clipboard.set_text(old_url, -1)
+        dictation = app.Dictation.__new__(app.Dictation)
+        dictation.session = object()
+        dictation.clipboard = clipboard
+        dictation.clipboard_snapshot = {
+            'session': dictation.session, 'ready': True, 'text': old_url}
+        dictation.paste_transaction = None
+        result = {}
+        loop = GLib.MainLoop()
+
+        def verified(transaction, _ready):
+            return app.Dictation._paste_clipboard_verified(dictation, transaction, False)
+
+        dictation._paste_clipboard_verified = verified
+        dictation._paste_target(
+            dictation.session, dictated,
+            lambda sent, _seconds, attempted: result.update(
+                sent=sent, attempted=attempted))
+        GLib.timeout_add(300, lambda: (loop.quit(), False)[1])
+        loop.run()
+        self.assertFalse(result.get('sent'))
+        self.assertFalse(result.get('attempted'))
+        self.assertEqual(clipboard.wait_for_text(), old_url)
 
 
 if __name__ == '__main__':

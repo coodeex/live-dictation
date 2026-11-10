@@ -78,10 +78,6 @@ GRAMMAR_PROMPT = ('Return the full dictated text with the same words, order, mea
                   'people\'s names. Write product and provider names in lowercase, such as '
                   'postgresql, chatgpt, claude, and google, except when one begins a sentence. '
                   'Do not summarize, shorten, or rephrase for style. Output only the revised text.')
-# A paste target can request clipboard data after the shortcut process exits.
-# Keep the transcript available long enough that restoring a copied link cannot
-# replace the text before a slow target actually reads it.
-PASTE_RESTORE_DELAY_MS = 1800
 PASTE_VERIFY_TIMEOUT_SECONDS = 1.5
 # ydotool key takes shortcut names; numeric press/release tokens type garbage.
 PASTE_KEYS = {
@@ -1531,7 +1527,10 @@ class Dictation:
             print(f'Could not start paste shortcut: {error}', file=sys.stderr)
             if transaction['process'] is not None:
                 transaction['sent'] = None
-            self._request_paste_restore(transaction)
+            if transaction['process'] is None:
+                self._request_paste_restore(transaction)
+            else:
+                self._finish_paste(transaction)
         return False
 
     def _paste_process_done(self, process, result, transaction):
@@ -1546,8 +1545,10 @@ class Dictation:
             transaction['command_timeout'] = None
         transaction['sent'] = sent
         transaction['paste_seconds'] = time.monotonic() - transaction['started']
-        delay = PASTE_RESTORE_DELAY_MS if transaction['sent'] else 0
-        GLib.timeout_add(delay, self._request_paste_restore, transaction)
+        # The shortcut exiting does not mean the target has read the selection.
+        # Leave the transcript on the clipboard after any attempted paste, so a
+        # busy target can read it whenever it finally handles Ctrl+V.
+        self._finish_paste(transaction)
 
     def _paste_command_timeout(self, transaction):
         if self.paste_transaction is transaction:
@@ -1556,7 +1557,7 @@ class Dictation:
             transaction['sent'] = None  # A partial paste may have occurred; do not type again.
             transaction['paste_seconds'] = time.monotonic() - transaction['started']
             transaction['process'].force_exit()
-            self._request_paste_restore(transaction)
+            self._finish_paste(transaction)
         return False
 
     def _request_paste_restore(self, transaction):
