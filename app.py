@@ -78,7 +78,10 @@ GRAMMAR_PROMPT = ('Return the full dictated text with the same words, order, mea
                   'people\'s names. Write product and provider names in lowercase, such as '
                   'postgresql, chatgpt, claude, and google, except when one begins a sentence. '
                   'Do not summarize, shorten, or rephrase for style. Output only the revised text.')
-PASTE_RESTORE_DELAY_MS = 600
+# A paste target can request clipboard data after the shortcut process exits.
+# Keep the transcript available long enough that restoring a copied link cannot
+# replace the text before a slow target actually reads it.
+PASTE_RESTORE_DELAY_MS = 1800
 PASTE_VERIFY_TIMEOUT_SECONDS = 1.5
 # ydotool key takes shortcut names; numeric press/release tokens type garbage.
 PASTE_KEYS = {
