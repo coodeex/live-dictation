@@ -55,7 +55,7 @@ Create `~/.config/systemd/user/live-dictation.service` with the following unit. 
 [Unit]
 Description=Live Dictation
 After=graphical-session.target
-Wants=graphical-session.target
+PartOf=graphical-session.target
 
 [Service]
 Type=simple
@@ -65,7 +65,7 @@ Restart=on-failure
 RestartSec=2
 
 [Install]
-WantedBy=default.target
+WantedBy=graphical-session.target
 ```
 
 Then run:
@@ -75,6 +75,12 @@ systemctl --user daemon-reload
 systemctl --user enable --now live-dictation.service
 systemctl --user status live-dictation.service
 ```
+
+The service follows the graphical session, so a new login starts it even when
+the user systemd manager stays running across logouts. If you previously
+enabled a version attached to `default.target`, run
+`systemctl --user disable live-dictation.service` before the commands above to
+replace its old enablement link.
 
 In **GNOME Settings → Keyboard → Custom Shortcuts**, add a shortcut for `python3 /ABSOLUTE/PATH/TO/live-dictation/client.py toggle`. Choose F4 or another free key. The shortcut talks to the already-running user service; it does not start a second app process.
 
