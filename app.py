@@ -79,6 +79,9 @@ GRAMMAR_PROMPT = ('Return the full dictated text with the same words, order, mea
                   'postgresql, chatgpt, claude, and google, except when one begins a sentence. '
                   'Do not summarize, shorten, or rephrase for style. Output only the revised text.')
 PASTE_VERIFY_TIMEOUT_SECONDS = 1.5
+# A completed Ctrl+V subprocess only means its key events were emitted. The
+# target can still be fetching the clipboard when an immediate Enter arrives.
+SEND_AFTER_PASTE_DELAY_MS = 1800
 # ydotool key takes shortcut names; numeric press/release tokens type garbage.
 PASTE_KEYS = {
     'ctrl+v': ('ctrl+v',),
@@ -287,7 +290,8 @@ def append_timing(session, recording_seconds, processing_seconds, status,
                   grammar_seconds=None, grammar_error=False,
                   delivery_seconds=None, atspi_seconds=None,
                   ydotool_seconds=None, paste_seconds=None,
-                  delivery_method=None, delivery_error=False):
+                  delivery_method=None, delivery_error=False,
+                  enter_requested=False, enter_command_success=None):
     entry = {
         'session': session.path.name,
         'started': session.started,
@@ -315,6 +319,8 @@ def append_timing(session, recording_seconds, processing_seconds, status,
                           if paste_seconds is not None else None),
         'delivery_method': delivery_method,
         'delivery_error': delivery_error,
+        'enter_requested': enter_requested,
+        'enter_command_success': enter_command_success,
     }
     descriptor = os.open(TIMINGS, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
     with os.fdopen(descriptor, 'a', encoding='utf-8') as log:
@@ -1931,7 +1937,9 @@ class Dictation:
                           ydotool_seconds=metrics['ydotool_seconds'],
                           paste_seconds=metrics['paste_seconds'],
                           delivery_method=metrics['delivery_method'],
-                          delivery_error=self.delivery_error)
+                          delivery_error=self.delivery_error,
+                          enter_requested=metrics.get('enter_requested', False),
+                          enter_command_success=metrics.get('enter_command_success'))
         except OSError as error:
             print(f'Could not save dictation timing: {error}', file=sys.stderr)
 
@@ -2150,6 +2158,7 @@ class Dictation:
         send_after = (not plan['format_requested'] and not plan.get('join_uncertain') and
                       (cue == 'send' or
                        (self.enter_button.get_active() and cue not in ('hold', 'format'))))
+        metrics['enter_requested'] = self.mode == 'cursor' and send_after
         if self.mode == 'buffer':
             buffer = self.text.get_buffer()
             buffer.insert(buffer.get_end_iter(), message)
@@ -2183,9 +2192,11 @@ class Dictation:
                 self.status.set_text('Could not type at caret · transcript kept in Buffer')
             else:
                 metrics['delivery_method'] = method
-            if typed and send_after and not self._press_enter():
-                self.delivery_error = True
-                self.status.set_text('Text inserted · Enter could not be pressed')
+            if typed and send_after:
+                metrics['enter_command_success'] = self._press_enter()
+                if not metrics['enter_command_success']:
+                    self.delivery_error = True
+                    self.status.set_text('Text inserted · Enter could not be pressed')
         done(metrics)
 
     def _paste_completed(self, session, message, send_after, metrics, done,
@@ -2193,12 +2204,15 @@ class Dictation:
         if self.session is not session:
             return
         metrics['paste_seconds'] = seconds
+        deferred = False
         try:
             if sent is True:
                 metrics['delivery_method'] = 'paste'
-                if send_after and not self._press_enter():
-                    self.delivery_error = True
-                    self.status.set_text('Text pasted · Enter could not be pressed')
+                if send_after:
+                    GLib.timeout_add(SEND_AFTER_PASTE_DELAY_MS,
+                                     self._send_after_paste, session, metrics, done)
+                    deferred = True
+                    return
             elif sent is None:
                 self.delivery_error = True
                 metrics['delivery_method'] = 'paste-uncertain'
@@ -2221,7 +2235,18 @@ class Dictation:
             self.delivery_error = True
             self.status.set_text(f'Could not finish paste: {error}')
         finally:
-            done(metrics)
+            if not deferred:
+                done(metrics)
+
+    def _send_after_paste(self, session, metrics, done):
+        if self.session is not session:
+            return False
+        metrics['enter_command_success'] = self._press_enter()
+        if not metrics['enter_command_success']:
+            self.delivery_error = True
+            self.status.set_text('Paste shortcut sent · Enter could not be pressed')
+        done(metrics)
+        return False
 
     def _finished(self, result, recording_seconds, processing_seconds):
         self._dismiss_mic_warning()
