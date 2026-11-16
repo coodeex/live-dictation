@@ -114,6 +114,15 @@ When F4 stops recording, the app saves the current text clipboard in memory. Bef
 
 The `cursor` command is the internal name for the UI's **Caret** destination. See [How it works](ARCHITECTURE.md) for the recording, transcription, and history paths.
 
+## Troubleshooting Caret paste
+
+If dictation reaches History but nothing appears at the caret, first restart
+the laptop and try a short recording again. A restart restored Caret paste
+after a case where the clipboard held the correct text and manual Ctrl+V
+worked, but the injected shortcut did not. If the problem persists after
+restarting, check the service log and keyboard injection path before changing
+the app.
+
 ## Develop alongside the daily app
 
 Keep the checkout used by the systemd service as production. Create a separate
