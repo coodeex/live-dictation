@@ -37,7 +37,7 @@ Before displaying or delivering text, a literal `+` between two ASCII letters is
 
 The hardcoded `WORD_CORRECTIONS` map in `app.py` also replaces whole-word recognition mistakes before delivery and in the History viewer. It currently maps `Klarvo` to `Clarvo`, regardless of case. Add another misspelling and preferred spelling there when a repeated error is confirmed. Raw transcripts on disk stay untouched.
 
-The small **↵** toggle is off by default. In Caret mode, enabling it presses the Enter key after the paste shortcut has had time to finish in the target, provided the original target still has focus. This guard matters for apps that fetch clipboard data asynchronously: the shortcut process exiting does not prove their editor has inserted the text yet. The target application decides whether Enter sends the message or inserts a line break. The setting persists between sessions and has no effect in Buffer mode.
+The small **↵** toggle is off by default. In Caret mode, enabling it presses the Enter key after successful text insertion, provided the original target still has focus. The target application decides whether Enter sends the message or inserts a line break. The setting persists between sessions and has no effect in Buffer mode.
 
 In Caret mode, ending a dictation with **YOLO** or **boom** also presses Enter after successful insertion, even if **↵** is off. Case and trailing punctuation do not matter. The cue is removed from the text delivered to the target (or Buffer if delivery falls back), while the exact Azure transcript stays in History. Buffer mode does not press Enter.
 
@@ -59,7 +59,7 @@ Runtime data lives in `~/.local/share/live-dictation/`, outside the Git clone:
 | :-- | :-- |
 | `settings.json` | Last selected destination and Enter toggle |
 | `buffer-draft.txt` | Editable buffer between restarts |
-| `timings.jsonl` | Append-only recording, transcription, optional Format or Grammar, Azure request, delivery, paste, AT-SPI, and typing fallback durations, plus delivery method, result, and whether Enter was requested and its command succeeded |
+| `timings.jsonl` | Append-only recording, transcription, optional Format or Grammar, Azure request, delivery, paste, AT-SPI, and typing fallback durations, plus delivery method and result |
 | `history/<timestamp-id>/audio.wav` | Recorded microphone audio |
 | `history/<timestamp-id>/transcript.txt` | Exact finalized transcript |
 | `history/<timestamp-id>/segments/*.wav` and `*.txt` | Audio and recognized text for each completed part of a segmented recording |

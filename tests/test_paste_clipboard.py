@@ -3,7 +3,6 @@ import os
 import shutil
 import sys
 import unittest
-from types import SimpleNamespace
 
 os.environ['LIVE_DICTATION_INSTANCE'] = 'dev'
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
@@ -19,66 +18,6 @@ from gi.repository import Gdk, GLib, Gtk
     Gdk.Display.get_default().get_name().startswith(':'),
     'requires an explicitly selected isolated X11 display and xclip')
 class ClipboardPasteTests(unittest.TestCase):
-    def test_auto_send_follows_a_slow_target_clipboard_read(self):
-        class SuccessfulShortcut:
-            def wait_finish(self, _result):
-                return True
-
-            def get_successful(self):
-                return True
-
-        clipboard = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
-        dictated = 'A delayed paste must arrive before Enter.'
-        buffer = Gtk.TextBuffer()
-        dictation = app.Dictation.__new__(app.Dictation)
-        dictation.session = object()
-        dictation.clipboard = clipboard
-        dictation.clipboard_snapshot = None
-        dictation.paste_transaction = None
-        dictation.delivery_error = False
-        dictation.status = SimpleNamespace(set_text=lambda _value: None)
-        events = []
-        loop = GLib.MainLoop()
-
-        def text_in_target():
-            return buffer.get_text(buffer.get_start_iter(), buffer.get_end_iter(), True)
-
-        def press_enter():
-            events.append(('enter', text_in_target()))
-            return True
-
-        def target_reads_clipboard():
-            buffer.set_text(clipboard.wait_for_text())
-            events.append(('paste', text_in_target()))
-            return False
-
-        def shortcut_exits(transaction):
-            dictation._paste_process_done(SuccessfulShortcut(), None, transaction)
-            return False
-
-        def verified(transaction, ready):
-            self.assertTrue(ready)
-            transaction['attempted'] = True
-            GLib.timeout_add(30, shortcut_exits, transaction)
-            GLib.timeout_add(900, target_reads_clipboard)
-            return False
-
-        dictation._press_enter = press_enter
-        dictation._paste_clipboard_verified = verified
-        metrics = {}
-        dictation._paste_target(
-            dictation.session, dictated,
-            lambda sent, seconds, attempted: dictation._paste_completed(
-                dictation.session, dictated, True, metrics,
-                lambda _metrics: (events.append(('done', None)), loop.quit()),
-                sent, seconds, attempted))
-        timeout = GLib.timeout_add(4000, lambda: (loop.quit(), False)[1])
-        loop.run()
-        GLib.source_remove(timeout)
-
-        self.assertEqual(events, [('paste', dictated), ('enter', dictated), ('done', None)])
-        self.assertTrue(metrics['enter_command_success'])
-
     def test_delayed_paste_reads_dictation_even_after_shortcut_exits(self):
         class SuccessfulShortcut:
             def wait_finish(self, _result):
