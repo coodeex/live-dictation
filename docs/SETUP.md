@@ -97,7 +97,14 @@ Log out and back in, then run `gnome-extensions enable live-dictation@coodeex`. 
 
 Caret mode sends a paste shortcut through `sudo -n ydotool key ctrl+v` after offering the transcript on the X11 clipboard. The optional **↵** toggle also uses `sudo -n ydotool key enter`. The original AT-SPI/`ydotool type` method remains available with `python3 client.py type`; switch back to paste with `python3 client.py paste`. The choice persists across restarts. These paths need `ydotool` and narrowly scoped, passwordless local permission for those commands. Buffer mode does not need them. Configure input injection according to your distribution's security model.
 
-When F4 stops recording, the app saves the current text clipboard in memory. Before sending the paste shortcut, it checks with `xclip` that the X11 clipboard contains the new transcript. If that check fails, it keeps the transcript in Buffer without typing it and restores the previous text only if the clipboard still contains the dictation. After an attempted paste, the transcript remains on the clipboard until you copy something else. This lets a busy target read the right text without an arbitrary restoration timer; the previous clipboard text can be recovered from a clipboard-history app. Other clipboard formats may be lost. A shortcut accepted by the input tool cannot prove that the target app pasted. If the shortcut times out after starting, the app reports an uncertain result and keeps the transcript in History instead of typing a possible duplicate.
+When F4 stops recording, the app saves the current text clipboard in memory. Before sending the paste shortcut, it checks with `xclip` that the X11 clipboard contains the new transcript. If that check fails, it keeps the transcript in Buffer without typing it and restores the previous text only if the clipboard still contains the dictation. After an attempted single paste, the transcript remains on the clipboard until you copy something else. This lets a busy target read the right text without an arbitrary restoration timer; the previous clipboard text can be recovered from a clipboard-history app. Other clipboard formats may be lost. A shortcut accepted by the input tool cannot prove that the target app pasted. If the shortcut times out after starting, the app reports an uncertain result and keeps the transcript in History instead of typing a possible duplicate.
+
+Caret messages above 3,700 characters are pasted as separate pieces of at most
+1,800 characters, with a short pause between pastes. This keeps each paste well
+below the size that triggered an attachment in the observed chat editor.
+Automatic Enter runs only after the last piece. For split messages, the final piece remains on the
+clipboard; the complete message remains in History. If focus or the clipboard
+changes between pieces, delivery stops rather than risk pasting into another app.
 
 ## Useful commands
 

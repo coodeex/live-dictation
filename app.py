@@ -79,6 +79,12 @@ GRAMMAR_PROMPT = ('Return the full dictated text with the same words, order, mea
                   'postgresql, chatgpt, claude, and google, except when one begins a sentence. '
                   'Do not summarize, shorten, or rephrase for style. Output only the revised text.')
 PASTE_VERIFY_TIMEOUT_SECONDS = 1.5
+# The 10-minute recording that triggered an attachment-style paste was 5,293
+# characters. Start splitting at about 70% of that length; make each paste
+# much smaller than the trigger so the destination sees separate short pastes.
+PASTE_SPLIT_TRIGGER_CHARS = 3700
+PASTE_CHUNK_MAX_CHARS = 1800
+PASTE_CHUNK_SETTLE_MS = 1500
 # ydotool key takes shortcut names; numeric press/release tokens type garbage.
 PASTE_KEYS = {
     'ctrl+v': ('ctrl+v',),
@@ -213,6 +219,24 @@ def normalize_transcript_for_display(text):
         text = re.sub(rf'(?<!\w){re.escape(heard)}(?!\w)', lambda _match: preferred, text,
                       flags=re.IGNORECASE)
     return text
+
+
+def paste_chunks(text):
+    """Split long caret pastes without altering a character of the message."""
+    if len(text) <= PASTE_SPLIT_TRIGGER_CHARS:
+        return [text]
+    chunks = []
+    remaining = text
+    while len(remaining) > PASTE_CHUNK_MAX_CHARS:
+        boundary = list(re.finditer(r'\s+', remaining[:PASTE_CHUNK_MAX_CHARS]))
+        end = (boundary[-1].end() if boundary and
+               boundary[-1].end() >= PASTE_CHUNK_MAX_CHARS // 2 else
+               PASTE_CHUNK_MAX_CHARS)
+        chunks.append(remaining[:end])
+        remaining = remaining[end:]
+    if remaining:
+        chunks.append(remaining)
+    return chunks
 
 
 def delivery_plan(transcript, allow_hold=False, format_enabled=False,
@@ -1471,20 +1495,36 @@ class Dictation:
         snapshot = self.clipboard_snapshot
         saved_text = (snapshot['text'] if snapshot is not None and
                       snapshot['session'] is session and snapshot['ready'] else None)
-        transaction = {'session': session, 'value': value, 'saved_text': saved_text,
+        chunks = paste_chunks(value)
+        transaction = {'session': session, 'value': chunks[0], 'chunks': chunks,
+                       'chunk_index': 0, 'completed_chunks': 0,
+                       'chunk_timer': None, 'saved_text': saved_text,
                        'done': done, 'started': time.monotonic(),
                        'paste_seconds': None, 'sent': False, 'restore_timeout': None,
                        'command_timeout': None, 'process': None, 'timed_out': False,
                        'attempted': False}
         self.paste_transaction = transaction
+        self._offer_paste_chunk(transaction)
+
+    def _offer_paste_chunk(self, transaction):
         try:
-            self.clipboard.set_text(value, -1)
+            self.clipboard.set_text(transaction['value'], -1)
         except Exception as error:
             print(f'Could not offer X11 clipboard text: {error}', file=sys.stderr)
-            self._request_paste_restore(transaction)
+            self._abort_paste_chunk(transaction)
             return
         threading.Thread(target=self._verify_paste_clipboard, args=(transaction,),
                          daemon=True).start()
+
+    def _abort_paste_chunk(self, transaction):
+        if transaction['completed_chunks']:
+            # Earlier pieces may already be in the target. Never offer the
+            # whole message again as a fallback and risk duplicating them.
+            transaction['sent'] = None
+            transaction['paste_seconds'] = time.monotonic() - transaction['started']
+            self._finish_paste(transaction)
+        else:
+            self._request_paste_restore(transaction)
 
     def _verify_paste_clipboard(self, transaction):
         # This popup and the target editor run under XWayland. Check the X11
@@ -1509,11 +1549,16 @@ class Dictation:
         if self.paste_transaction is not transaction:
             return False
         if not ready:
-            self._request_paste_restore(transaction)
+            self._abort_paste_chunk(transaction)
             return False
         if not self._target_focused():
-            self._request_paste_restore(transaction)
+            self._abort_paste_chunk(transaction)
             return False
+        self._send_paste_shortcut(transaction)
+        return False
+
+    def _send_paste_shortcut(self, transaction):
+        transaction['process'] = None
         try:
             command = ['sudo', '-n', 'ydotool', 'key', *PASTE_KEYS[PASTE_SHORTCUT]]
             process = Gio.Subprocess.new(
@@ -1528,10 +1573,9 @@ class Dictation:
             if transaction['process'] is not None:
                 transaction['sent'] = None
             if transaction['process'] is None:
-                self._request_paste_restore(transaction)
+                self._abort_paste_chunk(transaction)
             else:
                 self._finish_paste(transaction)
-        return False
 
     def _paste_process_done(self, process, result, transaction):
         try:
@@ -1543,12 +1587,46 @@ class Dictation:
         if transaction['command_timeout'] is not None:
             GLib.source_remove(transaction['command_timeout'])
             transaction['command_timeout'] = None
-        transaction['sent'] = sent
+        if not sent:
+            transaction['sent'] = None if transaction['completed_chunks'] else False
+            transaction['paste_seconds'] = time.monotonic() - transaction['started']
+            self._finish_paste(transaction)
+            return
+        transaction['completed_chunks'] += 1
+        if len(transaction['chunks']) > 1:
+            transaction['chunk_timer'] = GLib.timeout_add(
+                PASTE_CHUNK_SETTLE_MS, self._settle_paste_chunk, transaction)
+            return
+        transaction['sent'] = True
         transaction['paste_seconds'] = time.monotonic() - transaction['started']
         # The shortcut exiting does not mean the target has read the selection.
         # Leave the transcript on the clipboard after any attempted paste, so a
         # busy target can read it whenever it finally handles Ctrl+V.
         self._finish_paste(transaction)
+
+    def _settle_paste_chunk(self, transaction):
+        transaction['chunk_timer'] = None
+        if self.paste_transaction is not transaction:
+            return False
+        if transaction['completed_chunks'] == len(transaction['chunks']):
+            # The final piece stays on the clipboard for a slow target. The
+            # complete message is also durable in History.
+            transaction['sent'] = True
+            transaction['paste_seconds'] = time.monotonic() - transaction['started']
+            self._finish_paste(transaction)
+            return False
+        self.clipboard.request_text(self._next_paste_chunk, transaction)
+        return False
+
+    def _next_paste_chunk(self, _clipboard, current_text, transaction):
+        if self.paste_transaction is not transaction:
+            return
+        if current_text != transaction['value'] or not self._target_focused():
+            self._abort_paste_chunk(transaction)
+            return
+        transaction['chunk_index'] += 1
+        transaction['value'] = transaction['chunks'][transaction['chunk_index']]
+        self._offer_paste_chunk(transaction)
 
     def _paste_command_timeout(self, transaction):
         if self.paste_transaction is transaction:
@@ -1595,6 +1673,8 @@ class Dictation:
     def _finish_paste(self, transaction):
         if self.paste_transaction is not transaction:
             return
+        if transaction['chunk_timer'] is not None:
+            GLib.source_remove(transaction['chunk_timer'])
         if transaction['restore_timeout'] is not None:
             GLib.source_remove(transaction['restore_timeout'])
         if transaction['command_timeout'] is not None:
@@ -2195,7 +2275,8 @@ class Dictation:
         metrics['paste_seconds'] = seconds
         try:
             if sent is True:
-                metrics['delivery_method'] = 'paste'
+                metrics['delivery_method'] = ('paste-chunked' if
+                                              len(message) > PASTE_SPLIT_TRIGGER_CHARS else 'paste')
                 if send_after and not self._press_enter():
                     self.delivery_error = True
                     self.status.set_text('Text pasted · Enter could not be pressed')
