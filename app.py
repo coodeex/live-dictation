@@ -12,6 +12,7 @@ import pathlib
 import re
 import shutil
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -53,6 +54,9 @@ CONFIG_PATH = pathlib.Path(os.environ.get(
 BRIDGE = 'org.gnome.Shell.Extensions.LiveDictation'
 BRIDGE_PATH = '/org/gnome/Shell/Extensions/LiveDictation'
 HISTORY_PAGE_SIZE = 10
+AUDIO_RETENTION_SECONDS = 3 * 24 * 60 * 60
+AUDIO_CLEANUP_INTERVAL_SECONDS = 60 * 60
+AUDIO_SUFFIXES = frozenset({'.wav', '.mp3'})
 PCM_BYTES_PER_SECOND = 24000 * 2
 FIRST_SEGMENT_TRIGGER = 50
 FIRST_SEGMENT_END = 40
@@ -188,6 +192,40 @@ def atomic_text(path, contents):
     temp = path.with_suffix(path.suffix + '.tmp')
     temp.write_text(contents)
     temp.replace(path)
+
+
+def prune_old_audio(history_root, now=None, protected_session=None):
+    """Remove expired app audio, leaving session text and metadata intact."""
+    history_root = pathlib.Path(history_root)
+    if history_root.is_symlink() or not history_root.is_dir():
+        return 0, 0, 0
+    cutoff = (time.time() if now is None else now) - AUDIO_RETENTION_SECONDS
+    removed = bytes_removed = errors = 0
+    try:
+        sessions = list(history_root.iterdir())
+    except OSError:
+        return 0, 0, 1
+    for session in sessions:
+        if session == protected_session or session.is_symlink() or not session.is_dir():
+            continue
+        for folder in (session, session / 'segments'):
+            if folder.is_symlink() or not folder.is_dir():
+                continue
+            try:
+                for path in folder.iterdir():
+                    if path.suffix.lower() not in AUDIO_SUFFIXES:
+                        continue
+                    try:
+                        info = path.lstat()
+                        if stat.S_ISREG(info.st_mode) and info.st_mtime < cutoff:
+                            path.unlink()
+                            removed += 1
+                            bytes_removed += info.st_size
+                    except OSError:
+                        errors += 1
+            except OSError:
+                errors += 1
+    return removed, bytes_removed, errors
 
 
 def split_terminal_cue(transcript, allow_hold=False):
@@ -508,6 +546,9 @@ class Dictation:
         self.stop_event = None
         self.cancel_event = None
         self.worker = None
+        self.audio_cleanup_last = None
+        self.audio_cleanup_timer = None
+        self.audio_cleanup_running = False
         self.audio_loop = None
         self.audio_proc = None
         self.target_accessible = None
@@ -2332,6 +2373,45 @@ class Dictation:
                 self.close_timer = GLib.timeout_add(3000, self._hide_completed)
         elif result == 'cancelled':
             self.status.set_text('Ready · F4 to start')
+        self._schedule_audio_cleanup()
+        return False
+
+    def _schedule_audio_cleanup(self):
+        if self.audio_cleanup_running or self.audio_cleanup_timer is not None:
+            return
+        now = time.monotonic()
+        if (self.audio_cleanup_last is not None and
+                now - self.audio_cleanup_last < AUDIO_CLEANUP_INTERVAL_SECONDS):
+            return
+        self.audio_cleanup_timer = GLib.timeout_add_seconds(5, self._start_audio_cleanup)
+
+    def _start_audio_cleanup(self):
+        if self.stop_event is not None:
+            return True  # Wait until the next dictation has finished too.
+        self.audio_cleanup_timer = None
+        self.audio_cleanup_running = True
+        try:
+            threading.Thread(target=self._clean_audio_history, daemon=True).start()
+        except RuntimeError as error:
+            self.audio_cleanup_running = False
+            print(f'Could not start audio cleanup: {error}', file=sys.stderr)
+        return False
+
+    def _clean_audio_history(self):
+        active = self.session.path if self.session is not None else None
+        try:
+            result = prune_old_audio(HISTORY, protected_session=active)
+        except Exception as error:
+            print(f'Audio cleanup failed: {error}', file=sys.stderr)
+            result = (0, 0, 1)
+        GLib.idle_add(self._audio_cleanup_finished, *result)
+
+    def _audio_cleanup_finished(self, removed, bytes_removed, errors):
+        self.audio_cleanup_last = time.monotonic()
+        self.audio_cleanup_running = False
+        if removed or errors:
+            print(f'Audio cleanup: removed {removed} files ({bytes_removed} bytes); '
+                  f'{errors} errors', file=sys.stderr)
         return False
 
 
