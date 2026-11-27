@@ -89,6 +89,7 @@ PASTE_VERIFY_TIMEOUT_SECONDS = 1.5
 PASTE_SPLIT_TRIGGER_CHARS = 3700
 PASTE_CHUNK_MAX_CHARS = 1800
 PASTE_CHUNK_SETTLE_MS = 1500
+ENTER_MODE_CYCLE = {'on': 'once', 'once': 'off', 'off': 'on'}
 # ydotool key takes shortcut names; numeric press/release tokens type garbage.
 PASTE_KEYS = {
     'ctrl+v': ('ctrl+v',),
@@ -288,6 +289,12 @@ def delivery_plan(transcript, allow_hold=False, format_enabled=False,
             'format_error': None, 'grammar_error': None, 'grammar_seconds': None}
 
 
+def should_press_enter(enter_mode, cue, format_requested=False, join_uncertain=False):
+    if format_requested or join_uncertain or enter_mode == 'once':
+        return False
+    return cue == 'send' or (enter_mode == 'on' and cue not in ('hold', 'format'))
+
+
 def segment_window(index):
     """Start a short first part at 0:50, then continue the overlapping parts."""
     if index == 0:
@@ -446,6 +453,8 @@ class Session:
         self.path.mkdir(mode=0o700, parents=True)
         self.started = dt.datetime.now().astimezone().isoformat()
         self.mode = mode
+        self.enter_mode = 'off'
+        self.enter_mode_revision = 0
         self.events = (self.path / 'events.jsonl').open('a', buffering=1)
         self.events_lock = threading.Lock()
         self.audio = wave.open(str(self.path / 'audio.wav'), 'wb')
@@ -536,6 +545,8 @@ class Dictation:
             except (ValueError, OSError):
                 pass
         self.mode = self.prefs.get('mode', 'cursor')
+        self.enter_mode = 'on' if self.prefs.get('press_enter') is True else 'off'
+        self.enter_mode_revision = 0
         self.caret_insertion = self.prefs.get('caret_insertion', 'paste')
         if self.caret_insertion not in ('paste', 'type'):
             self.caret_insertion = 'paste'
@@ -709,15 +720,14 @@ class Dictation:
         self.grammar_button.get_style_context().add_class('ld-grammar-toggle')
         self.grammar_button.connect('toggled', self._grammar_changed)
         header_row.pack_start(self.grammar_button, False, False, 0)
-        self.enter_button = Gtk.ToggleButton(label='↵')
+        self.enter_button = Gtk.Button(label='↵')
         self.enter_button.set_relief(Gtk.ReliefStyle.NONE)
         self.enter_button.set_can_focus(False)
         self.enter_button.set_size_request(24, 24)
-        self.enter_button.set_active(self.prefs.get('press_enter') is True)
         self.enter_button.set_sensitive(self.mode == 'cursor')
-        self.enter_button.set_tooltip_text('Press Enter after inserting at caret')
         self.enter_button.get_style_context().add_class('ld-enter-toggle')
-        self.enter_button.connect('toggled', self._enter_changed)
+        self._refresh_enter_button()
+        self.enter_button.connect('clicked', self._enter_changed)
         header_row.pack_start(self.enter_button, False, False, 0)
         self.music_button = Gtk.ToggleButton(label='♫')
         self.music_button.set_relief(Gtk.ReliefStyle.NONE)
@@ -1320,8 +1330,32 @@ class Dictation:
         os.chmod(SETTINGS, 0o600)
 
     def _enter_changed(self, button):
-        self.prefs['press_enter'] = button.get_active()
+        self.enter_mode = ENTER_MODE_CYCLE[self.enter_mode]
+        self.enter_mode_revision += 1
+        self._refresh_enter_button()
+        self.prefs['press_enter'] = self.enter_mode != 'off'
         self._save_prefs()
+
+    def _refresh_enter_button(self):
+        context = self.enter_button.get_style_context()
+        context.remove_class('ld-enter-on')
+        context.remove_class('ld-enter-once')
+        if self.enter_mode == 'on':
+            context.add_class('ld-enter-on')
+            tip = 'Automatic Enter on · click to skip once'
+        elif self.enter_mode == 'once':
+            context.add_class('ld-enter-once')
+            tip = 'Skip Enter for this dictation · then return to automatic'
+        else:
+            tip = 'Automatic Enter off · click to turn on'
+        self.enter_button.set_tooltip_text(tip)
+
+    def _restore_enter_after_one_shot(self, session, result, plan):
+        if (result == 'complete' and plan and plan.get('message') and
+                session.enter_mode == 'once' and self.enter_mode == 'once' and
+                session.enter_mode_revision == self.enter_mode_revision):
+            self.enter_mode = 'on'
+            self._refresh_enter_button()
 
     def _format_changed(self, button):
         if button.get_active() and self.grammar_button.get_active():
@@ -1777,7 +1811,9 @@ class Dictation:
                 return
             self.session.format_requested = self.format_button.get_active()
             self.session.grammar_requested = self.grammar_button.get_active()
-            self.session.allow_hold = self.mode == 'cursor' and self.enter_button.get_active()
+            self.session.enter_mode = self.enter_mode
+            self.session.enter_mode_revision = self.enter_mode_revision
+            self.session.allow_hold = self.mode == 'cursor' and self.enter_mode != 'off'
             if self.caret_insertion == 'paste':
                 self._save_clipboard_for_paste(self.session)
             self._dismiss_mic_warning()
@@ -2036,6 +2072,7 @@ class Dictation:
         except Exception as error:
             self.delivery_error = True
             self.status.set_text(f'Could not save session: {error}')
+        self._restore_enter_after_one_shot(session, result, plan)
         processing_seconds = (time.monotonic() - self.processing_started
                               if self.processing_started is not None else None)
         self._finished(result, recording_seconds, processing_seconds)
@@ -2268,9 +2305,8 @@ class Dictation:
         if plan.get('join_uncertain'):
             self.delivery_error = True
             self.status.set_text('Please review this dictation')
-        send_after = (not plan['format_requested'] and not plan.get('join_uncertain') and
-                      (cue == 'send' or
-                       (self.enter_button.get_active() and cue not in ('hold', 'format'))))
+        send_after = should_press_enter(session.enter_mode, cue,
+                                        plan['format_requested'], plan.get('join_uncertain'))
         if self.mode == 'buffer':
             buffer = self.text.get_buffer()
             buffer.insert(buffer.get_end_iter(), message)

@@ -37,11 +37,11 @@ Before displaying or delivering text, a literal `+` between two ASCII letters is
 
 The hardcoded `WORD_CORRECTIONS` map in `app.py` also replaces whole-word recognition mistakes before delivery and in the History viewer. It currently maps `Klarvo` to `Clarvo`, regardless of case. Add another misspelling and preferred spelling there when a repeated error is confirmed. Raw transcripts on disk stay untouched.
 
-The small **↵** toggle is off by default. In Caret mode, enabling it presses the Enter key after successful text insertion, provided the original target still has focus. The target application decides whether Enter sends the message or inserts a line break. The setting persists between sessions and has no effect in Buffer mode.
+The small **↵** button is off by default and cycles **On → Skip once → Off → On**. On is bright green and presses Enter after successful Caret insertion when the original target still has focus. Skip once is a dimmer green: it leaves the current dictation as a draft, then returns to On after delivery. A cancelled or failed dictation does not consume Skip once. Off stays off across dictations and app restarts; On also persists, while Skip once is intentionally temporary. The target application decides whether Enter sends the message or inserts a line break. Buffer mode never presses Enter.
 
-In Caret mode, ending a dictation with **YOLO** or **boom** also presses Enter after successful insertion, even if **↵** is off. Case and trailing punctuation do not matter. The cue is removed from the text delivered to the target (or Buffer if delivery falls back), while the exact Azure transcript stays in History. Buffer mode does not press Enter.
+In Caret mode, ending a dictation with **YOLO** or **boom** also presses Enter after successful insertion, even if **↵** is Off. Skip once overrides spoken send cues so that its one message remains a draft. Case and trailing punctuation do not matter. The cue is removed from the text delivered to the target (or Buffer if delivery falls back), while the exact Azure transcript stays in History. Buffer mode does not press Enter.
 
-When **↵** is on, a final **hold** overrides it: the app inserts the text without pressing Enter and removes the spoken cue. With **↵** off, “hold” stays ordinary dictated text. A dictation containing only “hold” leaves the current draft untouched.
+When **↵** is On or Skip once, a final **hold** is removed from the text and Enter is not pressed. With **↵** Off, “hold” stays ordinary dictated text. A dictation containing only “hold” leaves the current draft untouched.
 
 The **♫** toggle is also off by default and persists between sessions. When recording starts, it pauses MPRIS players that are currently playing and remembers which player instances it paused. It resumes only those same instances after microphone capture stops, including when the recording is cancelled or capture fails. Turning the toggle on during recording pauses music then; turning it off resumes music it paused.
 
@@ -57,7 +57,7 @@ Runtime data lives in `~/.local/share/live-dictation/`, outside the Git clone:
 
 | Path | Purpose |
 | :-- | :-- |
-| `settings.json` | Last selected destination and Enter toggle |
+| `settings.json` | Last selected destination and persistent Enter setting; Skip once is not saved |
 | `buffer-draft.txt` | Editable buffer between restarts |
 | `timings.jsonl` | Append-only recording, transcription, optional Format or Grammar, Azure request, delivery, paste, AT-SPI, and typing fallback durations, plus delivery method and result |
 | `history/<timestamp-id>/audio.wav` | Recorded microphone audio, retained for three days |

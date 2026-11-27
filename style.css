@@ -123,11 +123,19 @@ window.ld-opaque { background: #10251f; }
 .ld-music-toggle:hover { background-color: rgba(209,250,229,0.14); }
 .ld-format-toggle:checked,
 .ld-grammar-toggle:checked,
-.ld-enter-toggle:checked,
+.ld-enter-toggle.ld-enter-on,
 .ld-music-toggle:checked {
     background-image: linear-gradient(180deg, @ld_accent, @ld_accent2);
     color: @ld_on_accent;
     border-color: rgba(255,255,255,0.20);
+}
+.ld-enter-toggle.ld-enter-once {
+    background-image: linear-gradient(180deg, #299c74, #1b7d5e);
+    color: #f0fff9;
+    border-color: rgba(167,243,208,0.24);
+}
+.ld-enter-toggle.ld-enter-once:hover {
+    background-image: linear-gradient(180deg, #35ab82, #238d6a);
 }
 .ld-format-toggle:disabled,
 .ld-grammar-toggle:disabled,

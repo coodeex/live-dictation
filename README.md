@@ -25,5 +25,5 @@ The panel opens at the top right of your primary monitor. Drag it elsewhere whil
 - **Write where you want.** Paste into the active caret, or collect text in an editable buffer to review and copy. Switch destinations while recording.
 - **Keep the music, or pause it.** Toggle automatic media pause for dictation; the app resumes only the players it paused.
 - **Choose your edit.** Grammar fixes spelling and punctuation while keeping your wording. Format makes rambling speech clearer and more concise. Both use AI; Format leaves sending to you.
-- **Choose when to press Enter.** In Caret mode, enable automatic Enter for chat apps that send on Enter. End with **“hold”** to keep a draft when it is on, or **“boom”** to press Enter when it is off. The spoken cue is removed from the delivered text.
+- **Choose when to press Enter.** Keep automatic Enter on, tap once for a single unsent draft, or tap twice to turn it off until you turn it back on. **“Hold”** keeps a draft when automatic Enter is on; **“boom”** sends when it is off.
 - **Find it again.** Browse and copy past transcripts in the popup. Text and timing history stay on your machine; audio older than three days is cleared after dictation.

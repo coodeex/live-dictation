@@ -163,10 +163,9 @@ class SegmentTests(unittest.TestCase):
 
     def test_uncertain_join_is_pasted_for_review_without_enter(self):
         dictation = app.Dictation.__new__(app.Dictation)
-        dictation.session = object()
+        dictation.session = SimpleNamespace(enter_mode='on')
         dictation.live = SimpleNamespace(set_text=lambda _value: None)
         dictation.status = SimpleNamespace(set_text=lambda _value: None)
-        dictation.enter_button = SimpleNamespace(get_active=lambda: True)
         dictation.mode = 'cursor'
         dictation.caret_insertion = 'paste'
         dictation.delivery_error = False
